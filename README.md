@@ -81,6 +81,16 @@ A runnable proof-of-concept lives in [`demo/`](demo/): a **real LLM agent** (Cla
 
 *The same run, scrolled: the exact `submit_intent` JSON the model emitted and the gateway's raw verdict for each — ending with the agent's own plain-English recap (approved / held / denied).*
 
+A **held** payment waits for a person — the agent can't release its own money:
+
+![Approvals inbox — a held payment awaiting a human](docs/img/demo-approvals-held.png)
+
+*The $6,000 held at `requireApproval` sits in the approvals inbox with **Approve** / **Reject** and the required approver role (`role:payments-manager`).*
+
+![Approved — the held payment is released and executed](docs/img/demo-approvals-approved.png)
+
+*After a human clicks **Approve**, the inbox clears and the live trace shows `DISPATCH money moved $6,000` — only now does the payment leave.*
+
 **Now flip the gateway off** — the same agent, the same intents, but nothing in the path to check them:
 
 ![Gateway off — every payment bypassed](docs/img/demo-gateway-off.png)
