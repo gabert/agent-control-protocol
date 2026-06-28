@@ -89,7 +89,7 @@ Examples (one operation each):
 ## 4. Vocabulary and enum injection
 
 The set of legal names is **not** open. Entity, action, transition, field, and enum-value names come from the **registry** and are injected into the agent's tool schema as **enums**. Therefore:
-- The agent **cannot emit a name that does not exist** — invalid names are unrepresentable, not merely rejected.
+- The legal names are **enum-injected** into the agent's tool schema, so a compliant model emits only declared ones; and because every intent is validated against the registry, anything undeclared is **rejected before it can act**.
 - There is **no raw-substrate operation** in the surface — no `run_sql`, no `exec`, no free-form command field. Anything that needs real code runs *below* SIF (e.g. as a declared action's handler), authored by the integrator, never by the agent.
 
 Adding a capability means **adding a declared action to the registry**, which flows through the same validated path — not adding a new SIF construct.
@@ -132,6 +132,8 @@ SIF is transport-neutral. Two bindings are defined:
 - **Interception** — existing tool/MCP calls are mapped to SIF operations by the gateway. Coverage equals what is mapped; an unmapped call MUST be denied.
 
 Transport is otherwise a deployment concern (see the architecture decisions doc).
+
+> **Relation to MCP.** SIF is not a new wire protocol. Concretely, the SIF-native binding is just an **MCP server (or equivalent tool interface) that exposes exactly one tool — `submit_intent` — whose schema is generated from the registry**. The contribution is the *shape* of that surface — a single, registry-typed intent tool with enum-injected names — not the transport: MCP already carries typed tool schemas; SIF narrows the agent to one registry-derived tool instead of many separately-registered ones. The interception binding rides ordinary MCP/tool transport too.
 
 > **On the SIF "schema".** The schema the agent is actually validated against is **generated from the registry** at startup (enum-injected names) — it is not a static file, because it must contain this domain's names. A thin static `schema/sif.schema.json` covers only generic L1 shape-checking. How the registry, SIF, and ACP schemas relate and run at runtime is set out in [`07-artifacts-and-schemas.md`](07-artifacts-and-schemas.md).
 
