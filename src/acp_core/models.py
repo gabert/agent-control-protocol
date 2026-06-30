@@ -168,4 +168,10 @@ class AuditRecord(BaseModel):
     approval: dict[str, Any] | None = None
     # Connector result: "success" | "failure" | "not_executed".
     outcome: str = "not_executed"
+    # RFC §11 (CS-009): the downstream identifier(s) of an executed/settled effect's
+    # result — the connector-returned id(s) of the created/changed record(s), the
+    # handle/lineage key an external system uses to locate/reconcile/compensate it.
+    # A *list* because one action may fan out to several records (a payment + its
+    # ledger entry); empty for refusals, holds, and non-effect actions.
+    resultRefs: list[str] = Field(default_factory=list)
     correlationId: str | None = None

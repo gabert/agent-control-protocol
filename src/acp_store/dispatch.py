@@ -19,13 +19,26 @@ The worker depends only on ``acp_core`` protocols (``OutboxStore``,
 from __future__ import annotations
 
 from acp_core.audit import build_record
-from acp_core.connector import ConnectorCancelled, ConnectorRegistry
+from acp_core.connector import ConnectorCancelled, ConnectorRegistry, ConnectorResult
 from acp_core.enums import Decision, Reversibility
 from acp_core.kill import KillStore, KillTarget
 from acp_core.models import AuditRecord, EvalResult, RawCall, ResolvedAction, Session
 from acp_core.outbox import KillCheck, OutboxStore, PendingAction, PendingState
 from acp_core.registry import Registry
 from acp_store.inflight import InFlightCall, InFlightRegistry
+
+
+def _result_refs_of(result: ConnectorResult) -> list[str]:
+    """The downstream id(s) of a settled effect (RFC §11 ``resultRefs``, CS-009):
+    the connector's explicit ``result_refs``, else ``[receipt['id']]`` if present,
+    else ``[]``. The handle(s) an external system uses to locate/compensate it; a
+    list because one dispatch may fan out to several records."""
+    if result.result_refs:
+        return list(result.result_refs)
+    receipt = result.receipt
+    if receipt is not None and receipt.get("id") is not None:
+        return [str(receipt["id"])]
+    return []
 
 
 class DispatchWorker:
@@ -119,7 +132,9 @@ class DispatchWorker:
             claimed.id,
             state=PendingState.DONE,
             result=result.receipt,
-            audit=self._audit_record(claimed, Decision.ALLOW, "success"),
+            audit=self._audit_record(
+                claimed, Decision.ALLOW, "success", result_refs=_result_refs_of(result),
+            ),
         )
         return True
 
@@ -167,7 +182,10 @@ class DispatchWorker:
             }
         )
 
-    def _audit_record(self, row: PendingAction, decision: Decision, outcome: str) -> AuditRecord:
+    def _audit_record(
+        self, row: PendingAction, decision: Decision, outcome: str,
+        *, result_refs: list[str] | None = None,
+    ) -> AuditRecord:
         result = EvalResult(decision=decision, rule="dispatch", gates=row.gates, ticket=row.id)
         return build_record(
             agent=row.agent,
@@ -181,4 +199,5 @@ class DispatchWorker:
             resolved=row.resolved,
             result=result,
             outcome=outcome,
+            result_refs=result_refs,
         )

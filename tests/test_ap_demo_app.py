@@ -94,6 +94,80 @@ def test_approval_flow_over_http(client: TestClient) -> None:
     assert client.get("/admin/approvals").json() == []
 
 
+def test_inbox_is_idempotent_no_duplicate_approvals(client: TestClient) -> None:
+    # first run: the $6,000 Globex is held once; all three invoices become "handled"
+    client.post("/agent/run", json={"scenario": "inbox", "provider": "fake"})
+    first = client.get("/admin/approvals").json()
+    assert len(first) == 1
+    handled = {i["id"]: i["handled"] for i in client.get("/inbox").json()["invoices"]}
+    assert handled == {"INV-1001": True, "INV-1002": True, "INV-1003": True}
+    # re-running does NOT pile up a second identical approval — same ticket, count 1
+    client.post("/agent/run", json={"scenario": "inbox", "provider": "fake"})
+    second = client.get("/admin/approvals").json()
+    assert len(second) == 1 and second[0]["id"] == first[0]["id"]
+
+
+def test_halted_invoice_stays_retryable(client: TestClient) -> None:
+    # gateway HALTED → every action halts and nothing becomes "handled"
+    order = client.post("/admin/kill",
+                        json={"scope": "global", "issued_by": "operator"}).json()
+    client.post("/agent/run", json={"scenario": "inbox", "provider": "fake"})
+    handled = {i["id"]: i["handled"] for i in client.get("/inbox").json()["invoices"]}
+    assert handled["INV-1001"] is False  # halted ≠ handled → still retryable
+    # lift the kill and re-run: the previously-halted invoices now go through
+    client.post(f"/admin/kill/{order['id']}/lift", json={"lifted_by": "operator"})
+    r = client.post("/agent/run", json={"scenario": "inbox", "provider": "fake"}).json()
+    assert any(d["decision"] == "allow" for d in r["decisions"])
+
+
+def test_audit_filter_finds_executed_pay_with_result_ref(client: TestClient) -> None:
+    client.post("/agent/run", json={"scenario": "happy", "provider": "fake"})
+    # the settled pay is findable AND carries the downstream handle(s) (CS-009)
+    paid = client.get("/audit",
+                      params={"action": "pay", "decision": "allow",
+                              "has_result_ref": True}).json()
+    assert paid and all(r["action"] == "pay" and r["resultRefs"] for r in paid)
+    # filters narrow the hunt; an unknown agent yields nothing
+    assert client.get("/audit", params={"agent": "nobody"}).json() == []
+
+
+def test_kill_halts_then_lift_resumes(client: TestClient) -> None:
+    # baseline: the happy path pays
+    r = client.post("/agent/run", json={"scenario": "happy", "provider": "fake"}).json()
+    assert any(d["decision"] == "allow" for d in r["decisions"])
+
+    # operator hits the emergency stop (global) → it shows in the active list
+    order = client.post("/admin/kill",
+                        json={"scope": "global", "issued_by": "operator"}).json()
+    assert order["scope"]["kind"] == "global"
+    assert [o["id"] for o in client.get("/admin/kill").json()] == [order["id"]]
+
+    # now every gated action is an audited HALT — nothing pays
+    killed = client.post("/agent/run", json={"scenario": "happy", "provider": "fake"}).json()
+    assert killed["decisions"] and all(d["decision"] == "halt" for d in killed["decisions"])
+    audit = client.get("/audit").json()
+    assert any(a["decision"] == "halt" for a in audit)
+
+    # lift it → the active list empties and the agent resumes
+    client.post(f"/admin/kill/{order['id']}/lift", json={"lifted_by": "operator"})
+    assert client.get("/admin/kill").json() == []
+    resumed = client.post("/agent/run", json={"scenario": "happy", "provider": "fake"}).json()
+    assert any(d["decision"] == "allow" for d in resumed["decisions"])
+
+
+def test_lift_unknown_kill_is_404(client: TestClient) -> None:
+    r = client.post("/admin/kill/does-not-exist/lift", json={"lifted_by": "operator"})
+    assert r.status_code == 404
+
+
+def test_issue_kill_emits_trace_event(client: TestClient) -> None:
+    client.post("/admin/kill", json={"scope": "global", "issued_by": "operator"})
+    with client.websocket_connect("/ws/trace") as ws:
+        ev = ws.receive_json()  # backfilled from history
+        assert ev["decision"] == "halt"
+        assert ev["rule"].startswith("kill:")
+
+
 def test_trace_websocket_backfills(client: TestClient) -> None:
     # produce a decision first, then connect — the WS backfills recent history
     client.post("/submit_intent",

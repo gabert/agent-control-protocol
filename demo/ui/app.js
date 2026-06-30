@@ -33,6 +33,7 @@ function stageOf(ev) {
   if (rule === "default-deny") return ["AUTHORIZE", "no allow rule matched → default deny"];
   if (rule.indexOf("scope") === 0) return ["SCOPE", "tenant/ownership scope check, below the model"];
   if (rule.indexOf("gate:") === 0) return ["GATES", "deterministic gate: " + ev.rule.slice(5)];
+  if (rule.indexOf("kill-lifted") === 0) return ["KILL", "the kill-switch was lifted — actions resume"];
   if (rule.indexOf("kill") === 0) return ["KILL", "the kill-switch halted this action"];
   if (rule.indexOf("rejected") === 0) return ["APPROVAL", "a human reviewer rejected the held action"];
   if (rule.indexOf("unavailable") >= 0) return ["FAIL-CLOSED", "a dependency was down → fail closed"];
@@ -74,7 +75,7 @@ function renderEvent(ev) {
 let _liveTimer = null;
 function scheduleLiveRefresh() {
   clearTimeout(_liveTimer);
-  _liveTimer = setTimeout(() => { refreshApprovals(); }, 250);
+  _liveTimer = setTimeout(() => { refreshApprovals(); refreshKill(); }, 250);
 }
 
 function connectTrace() {
@@ -140,29 +141,46 @@ function renderRun(res) {
   }
 }
 
-// --- gateway on/off toggle -------------------------------------------------
-function gatewayOn() {
+// --- gateway state line: ON / OFF / HALT -----------------------------------
+// The segmented control IS the gateway control. ON = enforce (runs go through the
+// gateway), OFF = bypass (runs hit the bank directly), HALT = the operator kill
+// switch — a real global kill on the server: every action becomes an audited HALT
+// and nothing staged dispatches. Selecting HALT issues the kill; ON/OFF lift it.
+function gwValue() {
   const el = document.querySelector('input[name="gw"]:checked');
-  return !el || el.value === "on";
+  return el ? el.value : "on";
+}
+function selectGw(v) {
+  const el = document.querySelector(`input[name="gw"][value="${v}"]`);
+  if (el) el.checked = true;
 }
 function reflectGateway() {
-  const on = gatewayOn();
-  document.getElementById("runner").classList.toggle("gwoff", !on);
-  document.getElementById("seg-on").classList.toggle("sel-on", on);
-  document.getElementById("seg-off").classList.toggle("sel-off", !on);
-  $("gwhint").innerHTML = on
-    ? "Gateway <b>ON</b>: payments are enforced &mdash; the $800 is paid, the $6,000 is held for "
-      + "approval, and tenant scope is checked."
-    : '<b class="danger">Gateway OFF &mdash; the agent’s tools hit the bank directly.</b> '
-      + "Every payment executes with NO checks: the $6,000 is not held, nothing is scoped or audited.";
+  const v = gwValue();
+  $("runner").classList.toggle("gwoff", v === "off");
+  $("runner").classList.toggle("killed", v === "halt");
+  document.body.classList.toggle("killed", v === "halt");
+  $("seg-on").classList.toggle("sel-on", v === "on");
+  $("seg-off").classList.toggle("sel-off", v === "off");
+  $("seg-halt").classList.toggle("sel-halt", v === "halt");
+  $("gwhint").innerHTML =
+    v === "on"
+      ? "Gateway <b>ON</b>: payments are enforced &mdash; the $800 is paid, the $6,000 is held for "
+        + "approval, and tenant scope is checked."
+      : v === "off"
+      ? '<b class="danger">Gateway OFF &mdash; the agent’s tools hit the bank directly.</b> '
+        + "Every payment executes with NO checks: the $6,000 is not held, nothing is scoped or audited."
+      : '<b class="danger">Gateway HALTED &mdash; the operator kill switch is active.</b> '
+        + "Every action the agent submits becomes an audited <b>HALT</b> and no staged payment dispatches; "
+        + "switch back to <b>ON</b> to resume. (It does not kill the agent or shut the gateway down.)";
 }
 
 async function runAgent(body) {
-  const mode = gatewayOn() ? "safe" : "unsafe";   // the toggle decides; request is otherwise identical
-  $("runstatus").textContent = `running the agent (gateway ${mode === "safe" ? "ON" : "OFF"})…`;
+  const v = gwValue();
+  const mode = v === "off" ? "unsafe" : "safe";   // ON & HALT run through the gateway
+  $("runstatus").textContent = `running the agent (gateway ${v.toUpperCase()})…`;
   $("agentout").innerHTML = '<div class="muted">running…</div>';
   const res = await postJSON("/agent/run", Object.assign({}, body, { mode }));
-  $("runstatus").textContent = `done via ${res.provider || "?"} — gateway ${mode === "safe" ? "ON" : "OFF"}`;
+  $("runstatus").textContent = `done via ${res.provider || "?"} — gateway ${v.toUpperCase()}`;
   renderRun(res);
   refreshApprovals();
 }
@@ -190,6 +208,45 @@ async function refreshApprovals() {
   }
 }
 
+// --- HALT = the global kill switch (server state behind the radio) ----------
+let _activeKill = null;   // the current active KillOrder, or null
+let _gwBusy = false;      // guard while a state change is in flight
+
+// Pull authoritative kill state from the server and reconcile the radio with it,
+// so a kill present on load (or toggled in another tab) shows as HALT here.
+async function refreshKill() {
+  try {
+    const orders = await getJSON("/admin/kill");
+    _activeKill = (orders && orders.length) ? orders[0] : null;
+  } catch (e) { _activeKill = null; }
+  if (!_gwBusy) {
+    const v = gwValue();
+    if (_activeKill && v !== "halt") selectGw("halt");
+    else if (!_activeKill && v === "halt") selectGw("on");
+  }
+  reflectGateway();
+}
+
+// The radio drives the gateway: HALT issues a global kill; ON/OFF lift it.
+async function onGatewayChange() {
+  if (_gwBusy) return;
+  _gwBusy = true;
+  const inputs = document.querySelectorAll('input[name="gw"]');
+  inputs.forEach((i) => (i.disabled = true));
+  try {
+    const v = gwValue();
+    if (v === "halt" && !_activeKill) {
+      await postJSON("/admin/kill", { scope: "global", issued_by: "operator" });
+    } else if (v !== "halt" && _activeKill) {
+      await postJSON(`/admin/kill/${_activeKill.id}/lift`, { lifted_by: "operator" });
+    }
+  } finally {
+    inputs.forEach((i) => (i.disabled = false));
+    _gwBusy = false;
+  }
+  await refreshKill();
+}
+
 // --- wiring ----------------------------------------------------------------
 document.addEventListener("click", async (e) => {
   const t = e.target.closest("button");
@@ -202,9 +259,10 @@ document.addEventListener("click", async (e) => {
 });
 
 $("refreshApprovals").onclick = refreshApprovals;
-document.querySelectorAll('input[name="gw"]').forEach((r) => r.addEventListener("change", reflectGateway));
+document.querySelectorAll('input[name="gw"]').forEach((r) => r.addEventListener("change", onGatewayChange));
 
 getJSON("/tool-schema").then((s) => { $("provider").textContent = "gateway online"; }).catch(() => {});
 reflectGateway();
 connectTrace();
 refreshApprovals();
+refreshKill();

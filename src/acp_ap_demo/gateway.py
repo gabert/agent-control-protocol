@@ -252,9 +252,11 @@ class APBundle:
         return row
 
     # --- kill switch -------------------------------------------------------- #
-    def issue_kill(self, scope: KillScope, *, issued_by: str) -> KillOrder:
+    def issue_kill(
+        self, scope: KillScope, *, issued_by: str, predicate: str | None = None
+    ) -> KillOrder:
         with self._lock:
-            return self.kill_service.issue(scope, issued_by=issued_by)
+            return self.kill_service.issue(scope, issued_by=issued_by, predicate=predicate)
 
     def lift_kill(self, order_id: str, *, lifted_by: str) -> KillOrder:
         with self._lock:

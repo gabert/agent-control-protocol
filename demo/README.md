@@ -29,7 +29,7 @@ demo/
 ├── seed/
 │   ├── ledger_seed.sql     vendors, accounts, legitimate invoices
 │   └── invoices/inbox/     acme_800.eml, globex_6000.eml
-└── ui/                     raw transcript · approvals · live trace (served by the gateway)
+└── ui/                     raw transcript · approvals · live trace · kill switch (served by the gateway)
 ```
 
 The Python lives in [`../src/acp_ap_demo/`](../src/acp_ap_demo) (so it is unit-
@@ -82,6 +82,15 @@ python -m acp_ap_demo --provider fake
 The UI also has a **Gateway ON / OFF** toggle: ON, every payment is enforced
 (allow / hold / deny); OFF, the agent's tools hit the bank directly and every
 payment just executes — the contrast that shows what the gateway adds.
+
+The top-right corner has a **KILL** button — the operator's emergency stop. One
+click issues a global kill: from that moment every action at the gateway becomes
+an audited **HALT** and no staged effect dispatches (invariant 5), so a re-run of
+any scenario stops cold. The button toggles to **Lift kill** (and the page wears a
+red frame while killed); lifting it lets the agent resume. Issuing and lifting are
+themselves audited operator actions, and both show on the live trace. The kill is
+a *gateway* control, so it only bites while the gateway is ON — with the gateway
+OFF there is nothing in the path to halt.
 
 In the UI, each run shows the **raw user + system prompt**, every **raw tool call**
 (`read_inbox`, then a `submit_intent` per invoice with its exact `{resource, action, data}`),

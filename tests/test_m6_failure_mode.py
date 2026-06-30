@@ -148,12 +148,13 @@ def test_f3_outbox_db_down_fails_closed_and_is_audited() -> None:
 
 def test_f3_outbox_down_even_with_open_fails_closed() -> None:
     # losing the staging substrate is not a "low-stakes" outage: open does not
-    # turn an unstageable effect into an allow.
+    # turn an unstageable effect into an allow. (Uses a *compensable* effect — an
+    # irreversible one under failureMode: open is itself a §13.5 linter error.)
     doc = {"agent": "support", "defaults": {"failureMode": "open"},
-           "allow": [{"effect": ["sendEmail"]}]}
-    result = _enforce(doc, resource="Email", action="sendEmail",
-                      data={"to": "x@acme.example"},
-                      connectors=Connectors({"email": InMemoryConnector()}),
+           "allow": [{"effect": ["pay"]}]}
+    result = _enforce(doc, resource="Payment", action="pay",
+                      data={"amount": 1},
+                      connectors=Connectors({"sql": InMemoryConnector()}),
                       outbox=_BrokenOutbox())
     assert result.decision is Decision.DENY
     assert result.rule == "outbox-unavailable"

@@ -37,7 +37,11 @@ class LiftKillBody(BaseModel):
     lifted_by: str
 
 
-def _scope_from(body: IssueKillBody) -> KillScope:
+def scope_from_body(body: IssueKillBody) -> KillScope:
+    """Build the durable ``KillScope`` for an ``IssueKillBody``, validating that the
+    facets the chosen ``scope`` kind requires are present (raises ``HTTPException``
+    422 otherwise). Shared by this router and the demo's kill control plane so the
+    request shape and validation have a single source of truth."""
     if body.scope is KillScopeKind.GLOBAL:
         return KillScope.for_global()
     if body.scope is KillScopeKind.AGENT:
@@ -63,7 +67,7 @@ def create_kill_router(service: KillService) -> APIRouter:
 
     @router.post("")
     def issue_kill(body: IssueKillBody) -> dict[str, object]:
-        order = service.issue(_scope_from(body), issued_by=body.issued_by,
+        order = service.issue(scope_from_body(body), issued_by=body.issued_by,
                               predicate=body.predicate)
         return order.model_dump(mode="json")
 

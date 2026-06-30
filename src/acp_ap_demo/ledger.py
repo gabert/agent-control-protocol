@@ -315,7 +315,14 @@ class LedgerConnector:
                 "type": "effect", "connector": "ledger-pay",
                 "action": "pay", "payment": stored, "key": idempotency_key,
             })
-        return ConnectorResult(kind="receipt", receipt=stored, handle=idempotency_key)
+        return ConnectorResult(
+            kind="receipt", receipt=stored, handle=idempotency_key,
+            # the payment id is the downstream handle an operator/external tool uses
+            # to locate and (via refund) compensate this effect — record it (CS-009).
+            # (One element here; a fan-out connector would list every record it wrote,
+            # e.g. the payment *and* its ledger entry.)
+            result_refs=[str(stored["id"])] if stored.get("id") is not None else [],
+        )
 
     def fetch_target(
         self, action: ResolvedAction, scope: ScopePredicate | None, actor: Actor

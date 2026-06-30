@@ -68,7 +68,7 @@ resources:
   Email:
     connector: email
     actions:
-      sendEmail: { kind: effect, reversibility: compensable }
+      sendEmail: { kind: effect, reversibility: irreversible }   # a sent email can't be un-sent
   Export:
     connector: in_memory
     actions:
@@ -83,8 +83,11 @@ resources:
     connector: sql
     actions:
       read: { kind: observe }
-      pay: { kind: effect, reversibility: compensable }
-      refund: { kind: effect, reversibility: compensable }
+      # compensable ⇒ a declared undo MUST exist (RFC §5, §13 rule 10). The undo is
+      # itself a gated action; expose it to an operator, not the agent (keep it out
+      # of the agent's allow-set).
+      pay:    { kind: effect, reversibility: compensable, compensation: { resource: Payment, action: refund } }
+      refund: { kind: effect, reversibility: compensable, compensation: { resource: Payment, action: pay } }
   Payee:
     connector: sql
     actions:
@@ -130,7 +133,7 @@ resources:
   Page:
     connector: email
     actions:
-      pageOnCall: { kind: effect, reversibility: compensable }
+      pageOnCall: { kind: effect, reversibility: irreversible }   # a page can't be un-sent
 
   # --- defence: air/maritime track operator ---
   Track:

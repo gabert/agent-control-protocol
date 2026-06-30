@@ -39,6 +39,11 @@ class ConnectorResult(BaseModel):
     # test assert that scope was injected *below* the model (B1).
     query: str | None = None
     handle: str | None = None  # in-flight cancellation handle (M5)
+    # The downstream identifier(s) of the created/changed record(s) (RFC §11
+    # resultRefs, CS-009). A connector that creates records SHOULD set this so the
+    # audit log is actionable; the dispatch worker falls back to ``[receipt["id"]]``
+    # when empty. A *list* because one dispatch may fan out to several records.
+    result_refs: list[str] = Field(default_factory=list)
 
 
 class Connector(Protocol):

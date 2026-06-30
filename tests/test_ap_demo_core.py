@@ -58,6 +58,23 @@ def test_g1_dispatch_is_idempotent(bundle: APBundle) -> None:
     assert len(bundle.ledger.payments()) == 1  # type: ignore[attr-defined]
 
 
+# --- CS-009: the settled effect's audit carries the downstream id (resultRef) ---
+def test_executed_pay_audit_carries_result_ref(bundle: APBundle) -> None:
+    result = _pay(bundle, _acme_800())
+    assert result.decision is Decision.ALLOW
+    assert bundle.drain() == 1
+    pay_id = bundle.ledger.payments()[0]["id"]  # type: ignore[attr-defined]
+    settle = [r for r in bundle.audit_records()
+              if r.action == "pay" and r.outcome == "success"]
+    assert settle and settle[0].resultRefs == [pay_id]  # the handle(s) to find/compensate it
+    # a refusal creates no downstream record, so it carries no resultRefs
+    denied = _pay(bundle, _acme_800() | {"destinationCountry": "KP"})
+    assert denied.decision is Decision.DENY
+    deny_recs = [r for r in bundle.audit_records()
+                 if r.action == "pay" and r.decision is Decision.DENY]
+    assert deny_recs and all(r.resultRefs == [] for r in deny_recs)
+
+
 # --- observe is scoped below the model (B1-style) ------------------------------
 def test_observe_account_is_tenant_scoped(bundle: APBundle) -> None:
     result = bundle.submit(actor_id=AP_OPERATOR, resource="Account", action="read",

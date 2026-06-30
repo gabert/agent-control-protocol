@@ -24,17 +24,20 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from acp_core import AuditRecord
 from acp_core.outbox import ApprovalError, SelfApprovalError, UnknownTicketError
 from acp_ap_demo.agent import (
     SYSTEM_PROMPT,
     DirectBackend,
     InProcessGatedBackend,
+    handled_invoice_ids,
     inbox_payload,
     run_agent,
 )
 from acp_ap_demo.gateway import APBundle, build_inmemory_bundle
 from acp_ap_demo.llm import select_provider
 from acp_ap_demo.scenarios import BLOCKED_PROMPT, GLOBEX_PROMPT, HAPPY_PROMPT, INBOX_PROMPT
+from acp_gateway.kill_api import IssueKillBody, LiftKillBody, scope_from_body
 from acp_gateway.transport import SifNativeTransport
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -83,8 +86,10 @@ def create_app(bundle: APBundle, *, default_provider: str = "auto") -> FastAPI:
 
     @app.get("/inbox")
     def inbox() -> dict[str, Any]:
-        # the agent's untrusted input — deliberately NOT a gated resource.
-        return inbox_payload()
+        # the agent's untrusted input — deliberately NOT a gated resource. Invoices
+        # the gateway already settled are tagged handled=true so a re-run is
+        # idempotent (no duplicate pay / piled-up approval); a halted one is not.
+        return inbox_payload(handled_invoice_ids(bundle))
 
     @app.post("/submit_intent")
     def submit_intent(
@@ -105,8 +110,36 @@ def create_app(bundle: APBundle, *, default_provider: str = "auto") -> FastAPI:
         }
 
     @app.get("/audit")
-    def audit_all() -> list[dict[str, Any]]:
-        return [r.model_dump(mode="json") for r in bundle.audit_records()]
+    def audit_all(
+        agent: str | None = None,
+        actor: str | None = None,
+        resource: str | None = None,
+        action: str | None = None,
+        decision: str | None = None,
+        has_result_ref: bool | None = None,
+    ) -> list[dict[str, Any]]:
+        """The audit log — the gateway's record so a human/external tool can *find*
+        what the agent did (and the ``resultRefs`` handles to reconcile/compensate it
+        downstream; RFC §11). Optional filters narrow the hunt; the gateway does not
+        perform the reversal itself (boundary note, §11)."""
+        records = bundle.audit_records()
+
+        def _keep(r: AuditRecord) -> bool:
+            if agent is not None and r.agent != agent:
+                return False
+            if actor is not None and r.actor != actor:
+                return False
+            if resource is not None and r.resource != resource:
+                return False
+            if action is not None and r.action != action:
+                return False
+            if decision is not None and r.decision.value != decision:
+                return False
+            if has_result_ref is not None and bool(r.resultRefs) != has_result_ref:
+                return False
+            return True
+
+        return [r.model_dump(mode="json") for r in records if _keep(r)]
 
     # --- approvals control plane, routed through the locked bundle --- #
     @app.get("/admin/approvals")
@@ -136,6 +169,42 @@ def create_app(bundle: APBundle, *, default_provider: str = "auto") -> FastAPI:
             raise HTTPException(404, f"no pending action {action_id}")
         except ApprovalError as exc:
             raise HTTPException(409, str(exc))
+
+    # --- kill switch control plane, routed through the locked bundle --- #
+    # The operator's emergency stop. Issuing a kill flags the chokepoint so every
+    # matching action becomes an audited HALT and no staged effect dispatches
+    # (invariant 5). Like approvals, these go through the bundle so they serialise
+    # on the shared DB connection; the agent never reaches them (operator control).
+    @app.get("/admin/kill")
+    def list_kills() -> list[dict[str, Any]]:
+        return [o.model_dump(mode="json") for o in bundle.active_kills()]
+
+    @app.post("/admin/kill")
+    def issue_kill(body: IssueKillBody) -> dict[str, Any]:
+        order = bundle.issue_kill(
+            scope_from_body(body), issued_by=body.issued_by, predicate=body.predicate
+        )
+        # Surface the halt on the live trace so the timeline shows it the instant
+        # the operator hits the button (the per-action HALTs follow on the next run).
+        bundle.trace.publish({
+            "type": "decision", "actor": body.issued_by,
+            "resource": "agent fleet", "action": "halt", "data": {},
+            "decision": "halt", "rule": f"kill:{order.id}", "ticket": order.id,
+        })
+        return order.model_dump(mode="json")
+
+    @app.post("/admin/kill/{order_id}/lift")
+    def lift_kill(order_id: str, body: LiftKillBody) -> dict[str, Any]:
+        try:
+            order = bundle.lift_kill(order_id, lifted_by=body.lifted_by)
+        except KeyError:
+            raise HTTPException(404, f"no kill order {order_id}")
+        bundle.trace.publish({
+            "type": "decision", "actor": body.lifted_by,
+            "resource": "agent fleet", "action": "resume", "data": {},
+            "decision": "allow", "rule": f"kill-lifted:{order.id}", "ticket": order.id,
+        })
+        return order.model_dump(mode="json")
 
     @app.post("/agent/run")
     async def agent_run(body: AgentRunBody) -> dict[str, Any]:

@@ -20,6 +20,8 @@
 | CS-005 | ADDED | §8 | A condition path that is **absent/null at runtime** makes its gate **fail closed**, distinct from evaluating `false`. |
 | CS-006 | ADDED | §11 | The audit write for an executed/settled effect **MUST share the transaction** with the state change (no effect-without-record, no record-without-effect). |
 | CS-007 | ADDED | §9 | Kill **propagation** across gateway instances MUST be prompt and **self-healing** (fast notify + authoritative re-read); kill store unreachable ⇒ fail closed for irreversible effects. |
+| CS-008 | ADDED | §13 | Linter MUST reject a `compensable` action whose registry entry declares no resolvable `compensation` — enforcing the §5 definition ("`compensable` = a declared undo exists"). Any declared `compensation` MUST name a resource+action that exists in the registry. |
+| CS-009 | ADDED | §11 | Audit record gains `resultRefs` (a **list**): the downstream identifier(s) of an executed/settled effect's result (connector-returned id(s) of the created/changed record(s); plural because one action may fan out). The lineage/correlation key that makes an audited effect *locatable* so an external system can reconcile or compensate it. |
 
 *One review item (interception-mode coverage: unmapped tools deny, free-form-string tools flagged) is a transport/architecture concern and lives in `docs/03-architecture-decisions.md`, not in this policy spec.*
 
@@ -101,13 +103,15 @@ Attributes are declared on each action in the registry and are **read-only** to 
 
 | Attribute | Allowed values | Meaning / typical use |
 |---|---|---|
-| `reversibility` | `reversible`, `compensable`, `irreversible` | How recoverable the action is. Drives approval/gate strength. `compensable` = a declared undo exists (refund, cancel). |
+| `reversibility` | `reversible`, `compensable`, `irreversible` | The action's **terminal** recoverability — classify by its most-committed state; a pre-commit *cancellable* window is a runtime/connector property (§8.5, §9), not this attribute. Drives **recovery** controls only: the compensation mandate (`compensable` ⇒ a declared undo MUST exist, §13 rule 10), the fail-closed floor for `irreversible` (§10), and blast-radius warnings (§13.4). `compensable` = a *declared, in-system, gateway-routable* undo **action** exists (refund, discontinue, closeBreaker), distinct from the original — **not** an out-of-band procedure (backup-restore, clinical antidote); `reversible` = self-undo / inverse-data on the same action. **Not** the approval trigger — see the note below. |
 | `emission` | `none`, `emits` | Whether the act reveals/transmits into the world even while "just looking." `emits` forces `observe`-looking sensing into `effect` handling. |
 | `operativeForce` | `none`, `low`, `high` | Whether parties treat the result as authoritative and act on it (a DNR, a designation). |
 | `resultSensitivity` | `public`, `internal`, `confidential`, `restricted`, or a domain classification label | Classification of data an `observe`/`assess` returns. Drives `disclosure`. |
 | `explainability` | `none`, `required` | Whether the action (typically `assess`) must carry a recorded rationale. |
 
 Domains MAY extend the *value sets* (e.g. add classification labels) but MUST NOT add new attribute *names*.
+
+> **Note — reversibility ≠ stakes (orthogonal axes).** Reversibility is *recoverability*; it is **not** a proxy for "needs a human." Whether to **hold for approval** is a *stakes* decision and is per-instance: an internal "ticket updated" email and an email leaking PII to an outsider are equally `irreversible`, but only one needs a supervisor. Key approval on **stakes** — `operativeForce`, `resultSensitivity`, and conditions over `data.*` — not on `reversibility`. Gating approval on `action.reversibility == irreversible` *alone* over-gates low-stakes irreversibles (a sent email, a page) and under-thinks high-stakes *reversibles*; the worked example in §14.1 keys its approval on `operativeForce` for this reason. Two cautions: **reversible ≠ safe** — a reversible action can have irreversible *consequences* (a re-closed breaker doesn't restore the blackout; revoking a grant doesn't undo what leaked during the access window), so gate on the consequence's blast radius, not the action's recoverability; and **orthogonal ≠ uncorrelated** — high-stakes irreversibles are common (administer, purge, e-file), so the two axes are *determined separately*, not mutually exclusive. (Design rationale + the cross-domain refinements behind this note: `docs/03` → "Reversibility ≠ stakes".)
 
 ---
 
@@ -177,6 +181,8 @@ scope:
 Scope predicates are declared/registered in the gateway (not free expressions). A scope on a resource applies to **every** kind touching it (an `observe`, a `record`, a `transition`). If a resource has a scope and the actor resolves to an empty set, matching actions return empty / are refused — never widened.
 
 **Reads vs effects (CS-001).** For `observe`/`record`/`transition` that read or write owned data, the predicate is realised as a **filter** (e.g. an injected `WHERE` clause) applied by the connector below the gateway. For an `effect` — where there is nothing to "filter" — the same predicate is enforced as a **pre-resolution authorization check**: the gateway resolves the effect's target first, and if the target is not in the actor's scoped set the action is **DENIED before dispatch**. Either way the agent never supplies or sees its own scope.
+
+**TOCTOU note (scope-on-effect is a pre-check, not yet a no-race guarantee).** In this version the scope-on-effect check is a **decision-time pre-check**: the target is read and authorized, then the effect is committed in a **separate** operation, and the predicate is **not** re-asserted on the write. So if the authorizing state changes in the check→commit window (an account reassigned to another tenant) the effect can land on un-authorized state — a TOCTOU race, **widened by staging** (§4.4) when the effect is held/queued. The principled fix is a **scope no-race**, analogous to the kill no-race (§9): re-assert the scope predicate **inside the effect's transaction** (`… WHERE target.tenant = :actor_tenant`) so the write commits against authorized state or not at all. It is connector-dependent (clean for a transactional SQL connector; sometimes impossible for an HTTP/email connector, which must declare the residual window). This guarantee is **deferred** (see `docs/03`). Separately, **pure read staleness is out of scope**: the gateway guarantees scope/disclosure correctness *at read time*, not that the data stays current — and because every effect is re-authorized independently, a stale read cannot itself cause an unauthorized effect.
 
 ---
 
@@ -401,11 +407,17 @@ list       := "[" [ literal ("," literal)* ] "]"
 
 **No-race guarantee (CS-004).** A `halt` MUST take effect before the connector dispatch of any pending `effect`. The gateway MUST evaluate the kill at three points — entry (whole-agent/session short-circuit), per-action (pipeline step 5), and **at dispatch**, where the kill re-check and the staged action's `pending → dispatching` transition MUST occur in **one serialised transaction** (e.g. a row-locked update) so there is no window in which an action has both passed the kill check and remains un-dispatched. Each staged action carries an **idempotency key** so a cancelled action can never later dispatch.
 
-**Scope of the guarantee (CS-004).** Kill prevents any *new* or *not-yet-dispatched* action; cancels in-flight actions whose connector is cancellable; and triggers declared **compensation** for irreversible effects already dispatched. It does **not** reverse an external effect that has already committed.
+**Scope of the guarantee (CS-004).** Kill prevents any *new* or *not-yet-dispatched* action; cancels in-flight actions whose connector is cancellable; and triggers declared **compensation** for irreversible effects already dispatched. It does **not** reverse an external effect that has already committed — nor does it reach effects that a committed effect *triggers downstream* (world→world cascades, §11 scope boundary): kill bounds the agent's actions, not the world's reactions.
 
 **Propagation (CS-007).** A kill MUST take effect across all gateway instances **promptly and reliably** — by fast notification (e.g. pub/sub) plus a self-healing authoritative re-read (e.g. an epoch counter) so a dropped notification cannot leave an instance unaware. If the kill store is unreachable, the gateway MUST **fail closed** for irreversible effects.
 
 *Mechanism detail (state stores, the locked-transition transaction, in-flight cancellation) is in the implementation design §8.*
+
+> **Clarification — two axes; `killable` is not an operator veto (UNDER REVIEW).** The wording above (*"`killable: true` … lets an operator issue a `halt`"*) reads as if `killable` gates the operator. It does not. There are **two independent axes**:
+> 1. **Operator emergency hard-kill** — a human operator can **always** halt a scope (fleet/gateway/agent/session/action-class) immediately and resume after investigation. This is a hard safety/security backstop: it is **unconditional and independent of `killable`**, and a policy **cannot opt out** (otherwise a compromised agent could declare itself un-killable — and an operator can pull the process/credentials/network regardless, so an opt-out is a false guarantee).
+> 2. **`killable`** — an action-level declaration of *the manner of stopping under normal/automated operation* (a generic live-freeze vs a declared safe-stop/compensation). It **informs but never blocks** the operator hard-kill (it drives a warning/confirmation when a hard-kill scope covers non-killable actions, and it guards *automated* halts).
+>
+> `killable` is also distinct from `reversibility`: `killable` = *may a generic live-halt stop this at all?*; `reversibility` = *how much can a kill claw back once it is in motion* (the "scope of the guarantee" above). The precise semantics, granularity, linter rule, and any reconciliation of the §9 wording are **open** — see `docs/03` → "Kill is two axes — operator hard-kill vs `killable`". Until they settle, treat the hard-kill as unconditional and `killable` as advisory.
 
 ---
 
@@ -436,9 +448,14 @@ Levels: `none` | `basic` (decisions only) | `full` (decisions + parameters + gat
 | `decision` | `allow` \| `hold` \| `deny` \| `halt`, with the deciding rule/gate. |
 | `approval` | Approver(s), quorum, outcome, timing — if applicable. |
 | `outcome` | Connector result: `success` \| `failure` (+ reason) \| `not_executed`. |
+| `resultRefs` | Stable downstream identifier(s) of the effect's result — the connector-returned id(s) of the created/changed record(s) (ledger entry, payment, message id, …). A **list**: one action may fan out to several records (a payment *and* its ledger entry), so it is the lineage/correlation key, not a single id. Populated for executed/settled effects; empty otherwise. The handle(s) an external system uses to locate, reconcile, or compensate the effect; the gateway records them but does **not** itself perform the reversal. |
 | `correlationId` | Session/transaction id for replay. |
 
 **Transactional audit (CS-006).** For an executed or settled `effect`, the audit record **MUST** be written in the **same transaction** as the state change it records (the outbox settle), so there can be neither an effect that occurred without a record nor a record of an effect that did not occur. Refusals and holds are recorded **before** the result is returned to the agent. Best-effort side-channel logging is **not** sufficient for the audit log.
+
+**Remediation is downstream (boundary note).** The gateway's role in undoing a wrong-but-allowed effect is to make it *findable and actionable* — a complete, attributable record carrying `resultRefs` (CS-009) — **not** to perform the reversal. The compensating action is executed by the system of record, or as a gated operator action (§9), never reconstructed inside the gateway.
+
+**Scope boundary — the gateway governs agent→world, not world→world.** The unit of enforcement is **one resolved action**; a compound/batch intent is decomposed into N actions, each independently authorized, audited, killed, and carrying its own `resultRefs` (bulk-as-one-effect is out of scope). The gateway records the *direct* effects of an agent action; it does **not** see or govern the **cascade** those effects trigger in downstream systems (a posted payment that fires a webhook → a journal entry → a covenant alert). Therefore an action's `reversibility`, `compensation`, `resultRefs`, and the kill guarantee all describe the **direct** effect only — never the world's reactions to it. Cascade reconciliation is the downstream systems' responsibility, joined back via `resultRefs`/`correlationId`; multi-step transactional consistency across several agent intents (sagas) is out of scope (the audit trail makes them reconstructable and externally unwindable, but ACP guarantees no atomicity across intents). Design analysis: `docs/03` → "Multi-effect & cascade".
 
 ---
 
@@ -455,6 +472,8 @@ For each attempted action the gateway MUST proceed strictly in this order, stopp
 
 On any dependency error, apply `failureMode` (§10).
 
+**Decision-time validity.** This evaluation runs at **decision time**. For a staged effect (§4.4), the only check re-run at **dispatch** is the kill switch (§9); gates are **not** re-evaluated — so a staged `allow` remains valid *as of when it was decided*, and a fact that changes between decision and dispatch (a payee added to a denylist, a drained balance) is caught only by a kill. Bounding that staleness (a decision TTL, or dispatch-time re-validation of volatile gates) is **out of scope for this version** — see `docs/03`.
+
 ---
 
 ## 13. Validation rules (what the linter MUST check)
@@ -467,6 +486,7 @@ On any dependency error, apply `failureMode` (§10).
 7. `assess` actions with `explainability: required` but no `requireExplanation` gate ⇒ **error**.
 8. Reads of `resultSensitivity > internal` with no `disclosure` gate ⇒ **warn**.
 9. Condition expressions parse against the grammar (§8) and reference only known namespaces/functions.
+10. A `compensable` action whose registry entry declares **no** `compensation` ⇒ **error** (the kind's definition, §5, is "a declared undo exists"); and any declared `compensation` that does **not** name a resource+action present in the registry ⇒ **error**. `irreversible` actions MAY declare a `compensation` but are not required to.
 
 ---
 
@@ -475,7 +495,7 @@ On any dependency error, apply `failureMode` (§10).
 Each example exercises several kinds and gates. Together they cover all five kinds and the full gate catalog.
 
 ### 14.1 Customer support assistant (data / business)
-*All reads scoped to the user's own customers; may email within corporate domains under a rate limit and DLP; may never refund or export; anything irreversible needs a supervisor.*
+*All reads scoped to the user's own customers; may email within corporate domains under a rate limit and DLP; may never refund or export; anything **high-impact** needs a supervisor (approval keys on stakes — `operativeForce` — not reversibility; see §5 note).*
 ```yaml
 apiVersion: acp/v0.1
 agent: support-assistant
@@ -504,7 +524,7 @@ gates:
     precondition: { from: [pending_confirmation] }
   '*':
     requireApproval:
-      when: "action.reversibility == irreversible"
+      when: "action.operativeForce == high"   # stakes, not reversibility (§5 note)
       approvers: role:support-supervisor
       timeout: 30m
       onTimeout: deny

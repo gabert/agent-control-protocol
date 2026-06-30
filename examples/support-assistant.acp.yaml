@@ -24,8 +24,11 @@ gates:
   Order.confirm:
     precondition: { from: [pending_confirmation] }
   '*':
+    # Approval keys on *stakes*, not reversibility: a high-impact action needs a
+    # supervisor. (Reversibility ≠ stakes — sendEmail is irreversible but low-force,
+    # so it flows under rate + DLP; it does not need a human. See docs/03.)
     requireApproval:
-      when: "action.reversibility == irreversible"
+      when: "action.operativeForce == high"
       approvers: role:support-supervisor
       timeout: 30m
       onTimeout: deny

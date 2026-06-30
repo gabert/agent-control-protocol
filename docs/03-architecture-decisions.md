@@ -42,6 +42,32 @@ acp/
 7. **Kill** = durable `kill_orders` + per-process in-memory set + Redis pub/sub for speed + epoch polling for self-heal (design §8). Three check points; the authoritative one is inside the dispatch transaction.
 8. **Audit** append-only; the app's DB role has no UPDATE/DELETE on the audit table; settle writes outcome + audit in one transaction (design §11).
 9. **OPA/IAM and SIEM are seams, not builds.** Define the protocols; ship the simple built-in policy and a Postgres/file audit sink. Real engines plug in later.
+10. **Kill is two independent axes** — the operator emergency hard-kill is **unconditional and independent of `killable`**; the `killable` tag is a separate *manner-of-stopping* declaration, never an operator veto. See the dedicated section below.
+
+## Kill is two axes — operator hard-kill vs `killable`
+
+- **Operator hard-kill is unconditional.** A human operator can always halt a scope (fleet / gateway / agent / session / action-class) immediately and lift it later. It does **not** consult `killable` and a policy cannot opt out — otherwise a compromised agent could declare itself un-killable, and an operator can pull the process/credentials/network regardless. Invariant; built today.
+- **`killable` is a *manner-of-stopping* declaration, not an operator veto.** `killable: false` = "a generic mid-flight freeze is unsafe; use the declared safe-stop/compensation." It guards *automated* halts and *informs* the hard-kill (warn/confirm), but never blocks it.
+- **Distinct from `reversibility`:** `killable` = may a live-halt stop this at all; `reversibility` = how much a kill can claw back once in motion (§9 scope of guarantee).
+- **Status / deferred.** Hard-kill built. `killable` is parsed (`effective_killable()`) but **not wired into `enforce()`** — so everything is killable today (safe by default); the `killable`-respecting graceful path is deferred, and RFC §9's wording (which reads as if `killable` gates the operator) must be reconciled before wiring. Open: (a) graceful halt as a built feature or a seam; (b) per-action vs per-agent; (c) `killable: false` ⇒ require a declared safe-stop; (d) one bool vs split `emergencyStoppable` / `liveHaltStrategy`.
+
+## Reversibility ≠ stakes — choose the right axis for approval
+
+- **Approval/hold keys on stakes, not reversibility.** `reversibility` drives *recovery* controls only — the compensation mandate (§13 rule 10), the irreversible fail-closed floor (§10), the §13.4 warning. Whether to involve a human is a *stakes* decision: `operativeForce`, `resultSensitivity`, conditions over `data.*`. Pattern: `ward-nurse` (`operativeForce == high`); `support-assistant` corrected to match. `reversible ≠ safe` (a reversible action can have irreversible consequences); the two axes are determined separately though often correlated.
+- **No new vocabulary.** "Stakes" composes existing attributes + data conditions; no severity attribute is added (invariant 8).
+- **`compensation` is narrow** — a registry-declared, in-system, gateway-routable action (refund, `discontinue`), **not** an out-of-band procedure (backup-restore, clinical antidote). Where recovery is only out-of-band, classify `irreversible`.
+- **reversible vs compensable** — if the undo is a *distinct* action, classify `compensable` (and declare it, §13 rule 10); `reversible` = same-action inverse-data / self-undo. (Authoring guidance; not linter-enforced.)
+- **`reversibility` is terminal & static** — the worst-case (most-committed) recoverability; the pre-commit cancellable window is a runtime/connector property (§8.5, §9), not the attribute.
+- **Deferred:** §13.4 warns on *any* unguarded irreversible (same proxy) — may later accept a content/rate/DLP gate, or scope to high `operativeForce`; left a WARN for now.
+
+## Multi-effect & cascade — scope and decomposition
+
+- **The unit of enforcement is one resolved action.** Compound/batch intents decompose into N independently-staged effects (each its own decision, kill check, audit, `resultRefs`, compensation); bulk-as-one-effect is out of scope. Aggregate/velocity risk is caught by counter gates (`rate`/`quota`/spend), not per-unit attributes.
+- **`resultRefs` is a list** (audit record + connector result) — one action may fan out to several records; it is the cross-system lineage/correlation key (CS-009). A fan-out action's `reversibility` is its **worst** sub-effect; its `compensation` covers only the recoverable part.
+- **The gateway governs agent→world, not world→world.** `reversibility`, `compensation`, `resultRefs`, and the kill guarantee describe the **direct** effect only; the cascade a committed effect triggers downstream is outside the chokepoint (kill can't stop it; compensation covers the direct effect). Chasing it would make ACP a distributed-transaction coordinator — out of scope; the seam is `resultRefs`/`correlationId` (RFC §9, §11).
+- **Sagas (multi-intent transactions) are out of scope** — reconstructable/unwindable via `correlationId` + `resultRefs`, but no atomicity guarantee across intents; fault-triggered rollback needs an actor independent of the agent.
+- **Decision freshness (deferred).** Gates decide at decision time; only the kill switch is re-checked at dispatch, so a staged `allow` is decide-time-valid (a payee sanctioned, or a balance drained, between approval and dispatch is caught only by a kill). A decision/approval **TTL** and dispatch-time re-validation of volatile guards (denylist, balance) are **deferred** — short-by-default/required for irreversible effects if built. (RFC §12.)
+- **Scope no-race (deferred).** `scope-on-effect` is a decision-time pre-check, not re-asserted atomically at the effect's commit, so a change to the authorizing state (account reassigned) in the check→commit window — widened by staging — can let an effect land on un-authorized state. Fix = re-assert the scope predicate **inside the effect transaction** (analogous to the kill no-race, §9), connector-dependent. Pure read staleness is out of scope (read-time correctness only). (RFC §6.3.)
 
 ## Concurrency notes for Python
 - The dispatch worker and the kill no-race property rely on **Postgres transactions and `SELECT … FOR UPDATE`**, not on Python threads — so the GIL is irrelevant to correctness here.

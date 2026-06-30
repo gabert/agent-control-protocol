@@ -78,6 +78,7 @@ def build_record(
     result: EvalResult,
     outcome: str = "not_executed",
     approval: dict[str, Any] | None = None,
+    result_refs: list[str] | None = None,
 ) -> AuditRecord:
     """Assemble an ``AuditRecord`` from a terminal evaluation.
 
@@ -100,5 +101,6 @@ def build_record(
         decision=result.decision,
         approval=approval,
         outcome=outcome,
+        resultRefs=list(result_refs or []),
         correlationId=session.correlation_id or session.id,
     )

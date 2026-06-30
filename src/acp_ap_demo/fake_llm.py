@@ -92,7 +92,9 @@ class FakeProvider:
         # Which invoices does the prompt select?
         want_amount = _amount(prompt)
         if "inbox" in prompt_l or "new invoices" in prompt_l or "process" in prompt_l:
-            selected = invoices
+            # process the whole inbox, but skip invoices the gateway already settled
+            # (handled=true) — idempotent re-runs (a halted invoice is not handled).
+            selected = [inv for inv in invoices if not inv.get("handled")]
         elif want_amount is not None:
             # a specific amount names a specific invoice (and only if it exists in
             # the inbox — a made-up amount selects nothing, deferring to the

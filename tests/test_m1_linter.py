@@ -153,3 +153,44 @@ def test_irreversible_unguarded_warns() -> None:
     # Disk.wipeDisk irreversible, allowed, no guard gate.
     report = _lint({"agent": "x", "allow": [{"effect": ["wipeDisk"]}]})
     assert any(f.code == "13.4" and f.severity is Severity.WARN for f in report.findings)
+
+
+# --- §13.10 (CS-008) compensable MUST declare a resolvable compensation ---
+def test_compensable_without_compensation_errors() -> None:
+    reg = load_registry(
+        {"resources": {"Doc": {"actions": {
+            "send": {"kind": "effect", "reversibility": "compensable"},  # no compensation
+        }}}}
+    )
+    report = validate_only({"agent": "x", "allow": [{"effect": ["send"]}]}, reg)
+    assert any(f.code == "13.10" and f.severity is Severity.ERROR for f in report.findings)
+
+
+def test_compensable_with_compensation_ok() -> None:
+    reg = load_registry(
+        {"resources": {"Doc": {"actions": {
+            "send": {"kind": "effect", "reversibility": "compensable",
+                     "compensation": {"resource": "Doc", "action": "unsend"}},
+            "unsend": {"kind": "effect", "reversibility": "irreversible"},
+        }}}}
+    )
+    report = validate_only({"agent": "x", "allow": [{"effect": ["send"]}]}, reg)
+    assert not any(f.code == "13.10" for f in report.findings)
+
+
+def test_dangling_compensation_errors() -> None:
+    reg = load_registry(
+        {"resources": {"Doc": {"actions": {
+            "send": {"kind": "effect", "reversibility": "compensable",
+                     "compensation": {"resource": "Doc", "action": "ghost"}},  # not declared
+        }}}}
+    )
+    report = validate_only({"agent": "x", "allow": [{"effect": ["send"]}]}, reg)
+    assert any(f.code == "13.10" and "not in the registry" in f.message
+               for f in report.findings)
+
+
+def test_payments_pay_declares_refund_compensation() -> None:
+    # the shipped registry's pay is compensable and now declares its undo → no 13.10
+    report = validate_only({"agent": "x", "allow": [{"effect": ["pay"]}]}, full_registry())
+    assert not any(f.code == "13.10" for f in report.findings)

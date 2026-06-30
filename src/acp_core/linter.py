@@ -132,7 +132,7 @@ def _all_action_names(registry: InMemoryRegistry) -> set[str]:
 
 
 # --------------------------------------------------------------------------
-# the nine checks
+# the checks
 # --------------------------------------------------------------------------
 def lint(policy: Policy, registry: InMemoryRegistry) -> LintReport:
     report = LintReport()
@@ -149,6 +149,7 @@ def lint(policy: Policy, registry: InMemoryRegistry) -> LintReport:
     _check_assess_explainability(policy, registry, report)
     _check_reads_disclosure(policy, registry, report)
     _check_conditions(policy, report)
+    _check_compensable_has_compensation(policy, registry, report)
     return report
 
 
@@ -355,6 +356,35 @@ def _check_open_on_irreversible(
             Severity.ERROR,
             f"failureMode: open with irreversible action {name} (not acknowledged)",
         )
+
+
+def _check_compensable_has_compensation(
+    policy: Policy, registry: InMemoryRegistry, report: LintReport
+) -> None:
+    """§13.10 (CS-008) — a ``compensable`` allowed action MUST declare a
+    compensation, and any declared compensation MUST name a resource+action that
+    exists in the registry. Enforces the §5 definition of ``compensable`` ("a
+    declared undo exists"); ``irreversible`` MAY declare one but is not required to.
+    """
+    resources = registry.file.resources
+    for rname, aname, adef in _allowed_action_defs(policy, registry):
+        comp = adef.compensation
+        if adef.reversibility is Reversibility.COMPENSABLE and comp is None:
+            report.add(
+                "13.10",
+                Severity.ERROR,
+                f"compensable action {rname}.{aname} declares no compensation "
+                f"(§5: compensable means a declared undo exists)",
+            )
+        if comp is not None:
+            target = resources.get(comp.resource)
+            if target is None or comp.action not in target.actions:
+                report.add(
+                    "13.10",
+                    Severity.ERROR,
+                    f"{rname}.{aname} declares compensation "
+                    f"{comp.resource}.{comp.action}, which is not in the registry",
+                )
 
 
 def _check_star_grants(policy: Policy, report: LintReport) -> None:
