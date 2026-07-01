@@ -213,3 +213,27 @@ A registry MUST pass `schema/registry.schema.json` (structure) plus these checks
 **`deny` names must exist too (ACP §13.1, CS-016).** v1.0 carved out an exception letting `deny` reference undeclared actions ("forbid it before it exists"). It is removed: a deny of an unknown name adds no protection — default-deny already refuses anything undeclared — and is almost always a typo that would silently become a no-op. **You deny things that exist**: to pre-forbid a capability, declare the action in the registry and deny it in the policy (the pattern the worked registries use — `Prescribing.prescribe`/`discontinue` exist precisely so the ward-nurse policy can deny them). Adding a dangerous action to the registry then surfaces every policy that must be reviewed, instead of silently activating alongside a stale deny.
 
 Worked registries: [`../examples/payments.registry.yaml`](../examples/payments.registry.yaml) (the demo domain) and [`../examples/ward-nurse.registry.yaml`](../examples/ward-nurse.registry.yaml). Each pairs with the policy of the same name.
+
+---
+
+## 9. Authoring tooling — drafting a registry from what you already have
+
+Writing a registry from scratch is the adoption cost of the whole model, so the repo ships an **authoring-time generator**, `src/acp_registry_gen/` (`python -m acp_registry_gen`). It drafts a registry in this spec's format from artefacts an integrator already has:
+
+| Input | What it becomes |
+|---|---|
+| **SQL DDL** (`CREATE TABLE` dump) | entities with typed `properties` (SQL → `int`/`decimal`/`boolean`/`dateTime`/`string`, `NOT NULL` → `required`); `tenant_id`-style columns get a *scope-key* hint, `*_id` columns a *reference* hint |
+| **OpenAPI spec** | `GET` → the entity only (reads are implicit, §4); `PUT`/`PATCH`/`DELETE` → `record` actions; `POST` → kind guessed from the `operationId` verb; request-body schemas → typed `data` |
+| **MCP tool list** (`tools/list` output) | each tool name split verb + entity (`send_email` → an `effect` on `Email`); `inputSchema` → typed `data` |
+
+Three rules keep it safe:
+
+1. **The output is a draft, and looks like one.** Every guessed kind and every suggested attribute carries a `TODO(review)` marker; the header is a review checklist. A human MUST review, complete, and sign the result — exactly like a hand-written registry.
+2. **Unknown verbs draft as `effect`** — the most-gated kind — so an unrecognised capability is *over*-governed until a human classifies it, never under-governed. Dangerous-looking verbs (`send`, `pay`, `wipe`, …) get a suggested `reversibility: irreversible` to confirm.
+3. **The generator is never in the enforcement path.** It runs at authoring time only; drafts are schema-validated (`schema/registry.schema.json`) before they are written, and the linter still gates the reviewed result at load.
+
+```
+python -m acp_registry_gen sql     schema.sql --domain payments -o draft.registry.yaml
+python -m acp_registry_gen openapi api.yaml   --domain ledger
+python -m acp_registry_gen mcp     tools.json --domain crm
+```

@@ -26,6 +26,7 @@ acp/
 ├── src/acp_gateway/     # FastAPI app: transports (SIF-native tool + MCP proxy), wiring, REST, dispatch worker
 ├── src/acp_admin_ui/    # minimal UI: trace, approvals inbox, kill button (thin / can come late)
 ├── src/acp_demo/        # the adversarial demo runner + sample agent (fake LLM client)
+├── src/acp_registry_gen/# AUTHORING-TIME registry drafting (SQL/OpenAPI/MCP -> draft registry; docs/06 §9) — never imported by the enforcement path
 └── tests/
 ```
 `acp_core` MUST have **no I/O and no LLM dependency**; it is pure and unit-testable in isolation. This is the trust kernel.
