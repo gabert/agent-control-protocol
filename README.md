@@ -1,4 +1,4 @@
-# Agent Control Gateway
+# Agent Control Protocol
 
 > **Status:** working proof-of-concept. The full specification (ACP v0.4) lives in [`docs/`](docs/); this repo also carries a Python reference implementation (`src/`, tested against real Postgres/Redis), a runnable real-LLM demo ([`demo/`](demo/)), and a [conformance kit](docs/12-conformance-tck.md) for certifying gateways in any language. Not production-hardened.
 
@@ -8,7 +8,7 @@ It's a **safety checkpoint that sits between an AI agent and the real systems it
 
 The slogan: **the AI proposes; a machine you control disposes.**
 
-Three names, once, so the rest of this page and the docs line up: the checkpoint component is the **gateway**; the rulebook it enforces is written in **ACP** (Agent Control Policy); the request-slip format the agent emits is **SIF** (Structured Intent Format). That's the whole vocabulary.
+Three names, once, so the rest of this page and the docs line up: the protocol is what this repo specifies — the contract between an agent and the systems it acts on. The checkpoint component that enforces it is the **gateway**; the rulebook language is **ACP** (Agent Control Policy); the request-slip format the agent emits is **SIF** (Structured Intent Format). That's the whole vocabulary.
 
 ## The analogy
 
