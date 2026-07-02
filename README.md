@@ -1,12 +1,14 @@
 # Agent Control Gateway
 
-> **Status:** design-stage / concept. The full specification and an implementation package live in [`docs/`](docs/); a reference implementation is in progress.
+> **Status:** working proof-of-concept. The full specification (ACP v0.4) lives in [`docs/`](docs/); this repo also carries a Python reference implementation (`src/`, tested against real Postgres/Redis), a runnable real-LLM demo ([`demo/`](demo/)), and a [conformance kit](docs/12-conformance-tck.md) for certifying gateways in any language. Not production-hardened.
 
-## What it is, in one sentence
+## What it is
 
 It's a **safety checkpoint that sits between an AI agent and the real systems it can touch** (your database, your email, your payment system). The AI can *propose* actions, but a separate, rule-following gatekeeper decides whether each action is actually allowed to happen, can pause it for a human, can block it, and writes down everything. There's also a stop button.
 
 The slogan: **the AI proposes; a machine you control disposes.**
+
+Three names, once, so the rest of this page and the docs line up: the checkpoint component is the **gateway**; the rulebook it enforces is written in **ACP** (Agent Control Policy); the request-slip format the agent emits is **SIF** (Structured Intent Format). That's the whole vocabulary.
 
 ## The analogy
 
@@ -14,7 +16,7 @@ Think of the AI as a brilliant but gullible new employee who works incredibly fa
 
 ## How it actually works — one example
 
-Say you deploy a **customer-support AI**. Its job: answer customers and email them their invoices. You've written a simple rulebook (a short, readable file) that says, in effect:
+Say you deploy a **customer-support AI**. Its job: answer customers and email them their invoices. You've written a simple rulebook — a short, readable file; in ACP terms, the *policy* — that says, in effect:
 
 - It may **read** customer and order records — *but only for the customer it's currently helping.*
 - It may **send email** — *but only to company-approved addresses, no more than 20 an hour, and the content gets scanned for sensitive data.*
@@ -35,7 +37,7 @@ And at any moment, if a manager sees something off, they hit the **stop button**
 
 Three design choices make it work:
 
-1. **The AI can only ever fill out request slips — it has no other way to act.** It can't write a database command, can't directly call email or payments. So there's no "back door" for an attacker to hijack into. Its entire power is "ask the checkpoint nicely."
+1. **The AI can only ever fill out request slips — it has no other way to act.** It can't write a database command, can't directly call email or payments. So there's no back door for an attacker to hijack into: the AI's entire power is to ask.
 
 2. **The checkpoint is dumb on purpose.** It's not another AI making judgment calls — it's plain rule-following code. It checks the request against your written rulebook the same way every single time. That predictability is exactly what auditors and regulators want.
 
@@ -75,7 +77,7 @@ The short rule: ACP earns its keep wherever an agent's action can **move money, 
 
 | Industry | The agent work | What the gateway contributes |
 |---|---|---|
-| **Financial services & payments** | AP/AR automation, payment ops, claims payouts | spend limits, sanctions denylists, approvals & dual-auth, decision freshness at dispatch — plus the audit evidence regulators already require |
+| **Financial services & payments** | AP/AR automation, payment ops, claims payouts | spend limits, sanctions denylists, approvals & dual-auth, a last-moment re-check before money moves (a payee sanctioned after approval is still caught) — plus the audit evidence regulators already require |
 | **Healthcare** | ward assistants, medication support, prior-auth | per-patient dose caps, forbidden-by-default prescribing, ward scoping, break-glass access, clinical sign-off made machine-enforced |
 | **Customer-facing ops** (CRM, support, e-commerce) | support agents, refunds, account changes | per-customer scoping below the model, recipient allowlists, content scanning, refund rate caps — prompt injection contained |
 | **Cloud / DevOps / MSPs** | agents holding infra credentials | environment allowlists, change windows, approval on destructive verbs, the kill-switch, and the no-tool-bypasses-the-gateway coverage check |
