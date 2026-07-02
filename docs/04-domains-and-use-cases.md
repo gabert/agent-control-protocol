@@ -90,3 +90,5 @@ The agent emits the **same shape of intent** regardless of substrate, and **neve
 | Regulated records | EHR / mission systems | sensitive read (`observe`), decision (`assess`), act (`effect`), lifecycle (`transition`) |
 
 The invariant across all of them: **one intent shape, governed one way, audited one way — the agent proposes in domain vocabulary, and a deterministic layer disposes against whatever substrate happens to be behind the connector.** The database was never the point; it was the first connector.
+
+*This document maps the technical substrates; who should deploy the gateway — the industries ranked by fit, their blocking risks, and the buyers — is [`13-who-is-this-for.md`](13-who-is-this-for.md).*

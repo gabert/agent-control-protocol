@@ -69,6 +69,25 @@ Companies are stuck: AI agents are capable enough to do real work, but most firm
 
 One honest caveat worth stating plainly: this **bounds what the AI is able to do, and proves it — it does not make the AI's choices correct.** A permitted-but-wrong action is still possible. It's containment, not omniscience. That's exactly why the human-approval steps and the audit trail matter.
 
+## Who is this for
+
+The short rule: ACP earns its keep wherever an agent's action can **move money, touch a regulated record, or cause an irreversible effect** — and where someone must later prove what the agent did and who allowed it. Concretely, in rough order of fit:
+
+| Industry | The agent work | What the gateway contributes |
+|---|---|---|
+| **Financial services & payments** | AP/AR automation, payment ops, claims payouts | spend limits, sanctions denylists, approvals & dual-auth, decision freshness at dispatch — plus the audit evidence regulators already require |
+| **Healthcare** | ward assistants, medication support, prior-auth | per-patient dose caps, forbidden-by-default prescribing, ward scoping, break-glass access, clinical sign-off made machine-enforced |
+| **Customer-facing ops** (CRM, support, e-commerce) | support agents, refunds, account changes | per-customer scoping below the model, recipient allowlists, content scanning, refund rate caps — prompt injection contained |
+| **Cloud / DevOps / MSPs** | agents holding infra credentials | environment allowlists, change windows, approval on destructive verbs, the kill-switch, and the no-tool-bypasses-the-gateway coverage check |
+| **Legal** | matter assistants, filings, docketing | privilege boundaries as scope, filing workflows as declared transitions, evidence of authority |
+| **Defence & critical infrastructure** | operator decision-support | emission control, ROE standing rules, dual-auth with positive ID — humans stay in command, provably |
+
+There's a second customer orthogonal to all of these: **platform and vertical-SaaS vendors who embed a gateway** in their own product — for them the spec, the registry generator, and the conformance TCK (certify your own implementation, any language) are the deliverables.
+
+And where it's the *wrong* tool, honestly: read-only low-stakes agents, creative workflows a human already reviews, and anything that's really an orchestration problem — ACP governs actions, not the agent's reasoning loop.
+
+The full analysis — each industry's blocking risk, the exact ACP mechanisms and worked policy examples that answer it, who the buyer is, and the recommended beachhead — is [`docs/13-who-is-this-for.md`](docs/13-who-is-this-for.md).
+
 ## See it run
 
 A runnable proof-of-concept lives in [`demo/`](demo/): a **real LLM agent** (Claude by default) doing accounts-payable work behind the gateway. The agent reads an invoice inbox and submits a payment intent for each invoice; the gateway allows the routine one, holds the mid-size one for a human, and refuses the one to a sanctioned-country vendor — every decision shown live and recorded.
@@ -127,7 +146,8 @@ The full version of this argument — the PDP/PEP category error, the four-verdi
 - **[Architecture decisions](docs/03-architecture-decisions.md)** — the chosen stack and structure.
 - **[Registry & domain model](docs/06-registry-domain-model.md)** — how to declare your resources/actions, and the generator that drafts a registry from SQL DDL, OpenAPI, or an MCP tool list.
 - **[Positioning vs OPA / Cedar / IAM / AgentCore](docs/10-positioning-policy-engines.md)** — why a decision engine alone can't govern an agent, and how they compose.
-- **[Conformance TCK](docs/12-conformance-tck.md)** — certify a gateway in any language against the RFC: one small driver adapter (Python protocol or 14 JSON endpoints), one report, named profiles.
+- **[Conformance TCK](docs/12-conformance-tck.md)** — certify a gateway in any language against the RFC: one small driver adapter (Python protocol or 15 JSON endpoints), one report, named profiles.
+- **[Who is this for](docs/13-who-is-this-for.md)** — the industries ranked by fit, each one's blocking risk mapped to the mechanisms that answer it, who buys, and where ACP is the wrong tool.
 - **Changelogs:** [v0.1 → v0.2](docs/RFC-changeset-v0.1-to-v0.2.md) · [v0.2 → v0.3](docs/RFC-changeset-v0.2-to-v0.3.md) · [v0.3 → v0.4](docs/RFC-changeset-v0.3-to-v0.4.md) (decision freshness + scope no-race, both implemented).
 
 ## License
