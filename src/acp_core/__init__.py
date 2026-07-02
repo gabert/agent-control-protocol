@@ -8,6 +8,13 @@ from __future__ import annotations
 
 from acp_core.audit import AuditSink, FallbackAuditSink, InMemoryAuditSink, build_record
 from acp_core.failure import Ok, Unavailable, guard, should_fail_closed
+from acp_core.freshness import (
+    STALE_DECISION,
+    VOLATILE_GATES,
+    DispatchRevalidator,
+    FreshnessConfig,
+    stale_guard_reason,
+)
 from acp_core.enums import (
     Decision,
     Emission,
@@ -66,7 +73,9 @@ from acp_core.outbox import (
     PendingAction,
     PendingState,
     SelfApprovalError,
+    StaleCheck,
     UnknownTicketError,
+    cancellation_record,
 )
 from acp_core.scope import (
     AttributeScope,
@@ -171,7 +180,15 @@ __all__ = [
     "OutboxError",
     "ApprovalError",
     "SelfApprovalError",
+    "StaleCheck",
     "UnknownTicketError",
+    "cancellation_record",
+    # decision freshness (v0.4 CS-017)
+    "FreshnessConfig",
+    "DispatchRevalidator",
+    "VOLATILE_GATES",
+    "STALE_DECISION",
+    "stale_guard_reason",
     # scope injection
     "ScopePredicate",
     "AttributeScope",

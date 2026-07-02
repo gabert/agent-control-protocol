@@ -18,9 +18,13 @@ The worker depends only on ``acp_core`` protocols (``OutboxStore``,
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import datetime, timezone
+
 from acp_core.audit import build_record
 from acp_core.connector import ConnectorCancelled, ConnectorRegistry, ConnectorResult
 from acp_core.enums import Decision, Reversibility
+from acp_core.freshness import STALE_DECISION, DispatchRevalidator, stale_guard_reason
 from acp_core.kill import KillStore, KillTarget
 from acp_core.models import AuditRecord, EvalResult, RawCall, ResolvedAction, Session
 from acp_core.outbox import KillCheck, OutboxStore, PendingAction, PendingState
@@ -57,12 +61,16 @@ class DispatchWorker:
         registry: Registry | None = None,
         kill: KillStore | None = None,
         inflight: InFlightRegistry | None = None,
+        clock: Callable[[], datetime] | None = None,
+        revalidate: DispatchRevalidator | None = None,
     ) -> None:
         self._store = store
         self._connectors = connectors
         self._registry = registry
         self._kill = kill
         self._inflight = inflight
+        self._clock = clock
+        self._revalidate = revalidate
 
     def _default_kill_check(self, row: PendingAction) -> bool:
         # The authoritative, in-transaction kill re-check (design §8.4). Reads the
@@ -70,15 +78,29 @@ class DispatchWorker:
         assert self._kill is not None
         return self._kill.matches(KillTarget.from_pending(row)) is not None
 
+    def _stale_check(self, row: PendingAction) -> str | None:
+        # Decision freshness inside the claim (v0.4 CS-017), after the kill check:
+        # TTL first, then the volatile-gate re-run. The worker is I/O-layer code,
+        # so a wall clock is the default; tests/gateways inject their own.
+        now = self._clock() if self._clock is not None else datetime.now(timezone.utc)
+        if row.expires_at is not None and now >= row.expires_at:
+            return STALE_DECISION
+        if self._revalidate is not None:
+            failing = self._revalidate(row, now)
+            if failing is not None:
+                return stale_guard_reason(failing.gate)
+        return None
+
     def run_once(self, kill_check: KillCheck | None = None) -> bool:
         """Process at most one staged row. Returns ``True`` if one was handled."""
         check: KillCheck | None = kill_check
         if check is None and self._kill is not None:
             check = self._default_kill_check
 
-        claimed = self._store.claim_next_pending(check)
+        claimed = self._store.claim_next_pending(check, self._stale_check)
         if claimed is None:
-            # either nothing PENDING, or the row was cancelled by the kill check
+            # nothing PENDING, or the remaining rows were cancelled in-claim
+            # (kill / stale-decision / stale-guard)
             return False
 
         try:

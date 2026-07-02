@@ -121,12 +121,14 @@ The full version of this argument — the PDP/PEP category error, the four-verdi
 
 ## Learn more
 
+- **[SIF — the intent format](docs/00-RFC-sif-intent-format.md)** — the five action kinds and the shape the agent emits; the layer everything else builds on.
 - **[Specification](docs/01-RFC-agent-control-policy.md)** — the rulebook language, with worked examples across five domains.
 - **[Implementation design](docs/02-implementation-design.md)** — how the gateway executes it, including the stop button in full.
 - **[Architecture decisions](docs/03-architecture-decisions.md)** — the chosen stack and structure.
+- **[Registry & domain model](docs/06-registry-domain-model.md)** — how to declare your resources/actions, and the generator that drafts a registry from SQL DDL, OpenAPI, or an MCP tool list.
 - **[Positioning vs OPA / Cedar / IAM / AgentCore](docs/10-positioning-policy-engines.md)** — why a decision engine alone can't govern an agent, and how they compose.
 - **[Conformance TCK](docs/12-conformance-tck.md)** — certify a gateway in any language against the RFC: one small driver adapter (Python protocol or 14 JSON endpoints), one report, named profiles.
-- **Changelogs:** [v0.1 → v0.2](docs/RFC-changeset-v0.1-to-v0.2.md) · [v0.2 → v0.3](docs/RFC-changeset-v0.2-to-v0.3.md).
+- **Changelogs:** [v0.1 → v0.2](docs/RFC-changeset-v0.1-to-v0.2.md) · [v0.2 → v0.3](docs/RFC-changeset-v0.2-to-v0.3.md) · [v0.3 → v0.4 (proposed; CS-017 implemented)](docs/RFC-changeset-v0.3-to-v0.4.md).
 
 ## License
 

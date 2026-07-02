@@ -1,6 +1,6 @@
 # ACP RFC — Change Set v0.3 → v0.4 (PROPOSED)
 
-**Status: PROPOSED — not yet merged into `docs/01` (the RFC remains v0.3) and not yet implemented.** This document promotes the two deferred timing guarantees (`docs/03` → "Decision freshness", "Scope no-race") from *documented boundary* to *specified behaviour*. It becomes normative when accepted; implement it items-first like the previous change sets.
+**Status: PROPOSED — not yet merged into `docs/01` (the RFC remains v0.3). CS-017 is implemented in the reference (scenarios D5/D6, `acp_core/freshness.py`, outbox/dispatch); CS-018 is not yet implemented.** This document promotes the two deferred timing guarantees (`docs/03` → "Decision freshness", "Scope no-race") from *documented boundary* to *specified behaviour*. It becomes normative when accepted; implement it items-first like the previous change sets.
 
 **Why these two.** They are the questions a payments/healthcare buyer opens with, and both close the same shape of gap: a fact that was true at **decision time** stops being true before **dispatch/commit time**. v0.3 handles that window honestly (documented, kill-only); v0.4 closes it where it can be closed and prices it where it can't.
 
@@ -25,6 +25,7 @@
   2. **Volatile-gate re-validation at dispatch.** Inside the dispatch claim (after the §9 kill re-check, before the connector call), the gateway re-evaluates the action's **volatile** gates: `allowlist`/`denylist` (set membership changes), `window` (time has passed), `precondition` / `emissionControl` checks (world state changes) — including registry-intrinsic preconditions. It MUST do so for `irreversible` effects and SHOULD for all staged effects. A dispatch-time failure settles `CANCELLED` with reason `stale-guard:<gate>` (audited), never a partial dispatch.
   3. **Non-volatile gates are NOT re-run**, by definition: `valueLimit` (the staged `data` is frozen), `contentCheck` (the payload is frozen), `rate`/`quota`/`quantityCap`/`spendLimit` (consumed at decision time — re-running double-counts), `requireApproval`/`dualAuthorization` (the grant *is* the release; its freshness is bounded by the TTL, rule 1).
 - **Impact:** staging writes `expires_at`; the dispatch worker's claim transaction gains the TTL check and the volatile-gate re-run (gate engine invoked with a dispatch-time `RequestEnv`); two new settle reasons; audit carries the re-validation outcome. No policy syntax, no schema change.
+- **How to enable (reference implementation):** opt-in via `FreshnessConfig` — pass it to `enforce(freshness=…)` (with an injected clock in `RequestEnv.now`) and give the `DispatchWorker` a `clock` plus `make_dispatch_revalidator(engine, policy)`. Full wiring and semantics: `docs/02` §9.1.
 - **Test:** **D5** (a staged effect whose TTL lapsed is cancelled at claim, never dispatched; late approval does not resurrect it), **D6** (denylist updated between decision and dispatch ⇒ the staged `pay` settles `stale-guard:denylist`, nothing sent; a fresh submission is denied at decision time).
 
 ## CS-018 — ADDED — §6.3 Scope no-race

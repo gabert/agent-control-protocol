@@ -15,6 +15,7 @@ imported lazily so importing this module never requires it.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any
 
 from acp_core.gating import ApprovalSpec
@@ -25,7 +26,9 @@ from acp_core.outbox import (
     PendingAction,
     PendingState,
     SelfApprovalError,
+    StaleCheck,
     UnknownTicketError,
+    cancellation_record,
 )
 from acp_store.outbox_memory import build_pending
 
@@ -88,11 +91,12 @@ class PostgresOutboxStore:
         gates: tuple[GateResult, ...] = (),
         approval: ApprovalSpec | None = None,
         compensation: Compensation | None = None,
+        expires_at: datetime | None = None,
     ) -> PendingAction:
         row = build_pending(
             resolved=resolved, actor=actor, session_id=session_id, agent=agent,
             state=state, correlation_id=correlation_id, gates=gates,
-            approval=approval, compensation=compensation,
+            approval=approval, compensation=compensation, expires_at=expires_at,
         )
         with self._conn.transaction(), self._conn.cursor() as cur:
             cur.execute(
@@ -130,30 +134,45 @@ class PostgresOutboxStore:
         return [_from_payload(r[0]) for r in rows]
 
     def claim_next_pending(
-        self, kill_check: KillCheck | None = None
+        self,
+        kill_check: KillCheck | None = None,
+        stale_check: StaleCheck | None = None,
     ) -> PendingAction | None:
-        with self._conn.transaction(), self._conn.cursor() as cur:
-            cur.execute(
-                """SELECT id, payload FROM pending_actions
-                   WHERE state = %s ORDER BY seq
-                   FOR UPDATE SKIP LOCKED LIMIT 1""",
-                (PendingState.PENDING.value,),
-            )
-            found = cur.fetchone()
-            if found is None:
-                return None
-            action_id, payload = found
-            row = _from_payload(payload)
-            if kill_check is not None and kill_check(row):
-                # killed inside the SAME transaction as the claim (§8.4).
-                cancelled = row.model_copy(
-                    update={"state": PendingState.CANCELLED, "reason": "kill"}
+        # Each iteration claims the next PENDING row in its own FOR UPDATE
+        # transaction; a killed/stale row is cancelled in that same transaction
+        # (§8.4 / CS-017) and the scan moves on so it never blocks the queue.
+        while True:
+            with self._conn.transaction(), self._conn.cursor() as cur:
+                cur.execute(
+                    """SELECT id, payload FROM pending_actions
+                       WHERE state = %s ORDER BY seq
+                       FOR UPDATE SKIP LOCKED LIMIT 1""",
+                    (PendingState.PENDING.value,),
                 )
-                self._write(cur, cancelled)
-                return None
-            claimed = row.model_copy(update={"state": PendingState.DISPATCHING})
-            self._write(cur, claimed)
-            return claimed
+                found = cur.fetchone()
+                if found is None:
+                    return None
+                action_id, payload = found
+                row = _from_payload(payload)
+                if kill_check is not None and kill_check(row):
+                    # killed inside the SAME transaction as the claim (§8.4).
+                    cancelled = row.model_copy(
+                        update={"state": PendingState.CANCELLED, "reason": "kill"}
+                    )
+                    self._write(cur, cancelled)
+                    return None
+                if stale_check is not None and (stale := stale_check(row)) is not None:
+                    # stale inside the claim (v0.4 CS-017): cancel + audit commit
+                    # together, then scan for the next fresh row.
+                    cancelled = row.model_copy(
+                        update={"state": PendingState.CANCELLED, "reason": stale}
+                    )
+                    self._write(cur, cancelled)
+                    self._write_audit(cur, cancellation_record(cancelled, stale))
+                    continue
+                claimed = row.model_copy(update={"state": PendingState.DISPATCHING})
+                self._write(cur, claimed)
+                return claimed
 
     def settle(
         self,

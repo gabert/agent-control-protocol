@@ -18,12 +18,15 @@ imports it back into the kernel.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from acp_core.condition import ConditionRuntimeError, EvalContext, make_window
 from acp_core.enums import Kind, Outcome
+from acp_core.freshness import VOLATILE_GATES, DispatchRevalidator
 from acp_core.gating import ApprovalSpec, GateOutcome, RequestEnv
 from acp_core.models import Actor, GateResult, ResolvedAction, Session
+from acp_core.outbox import PendingAction
 from acp_store import CounterStore, InMemoryCounterStore
 from acp_gates import gates as g
 from acp_gates.base import GateContext, GateFn, PreconditionCheck, passed
@@ -104,6 +107,28 @@ class DefaultGateEngine:
         self.hooks: ContentHookRegistry = hooks or default_hooks()
         self.preconditions: dict[str, PreconditionCheck] = dict(preconditions or {})
 
+    def _context(
+        self,
+        resolved: ResolvedAction,
+        actor: Actor,
+        session: Session,
+        policy: "CompiledPolicy",
+        env: RequestEnv,
+    ) -> GateContext:
+        return GateContext(
+            resolved=resolved,
+            actor=actor,
+            session=session,
+            env=env,
+            eval_ctx=build_eval_context(resolved, actor, env),
+            registry=self.registry,
+            counters=self.counters,
+            hooks=self.hooks,
+            preconditions=self.preconditions,
+            failure_mode=policy.policy.defaults.failureMode,
+            agent=policy.agent,
+        )
+
     def evaluate(
         self,
         resolved: ResolvedAction,
@@ -112,20 +137,7 @@ class DefaultGateEngine:
         policy: "CompiledPolicy",
         env: RequestEnv,
     ) -> GateOutcome:
-        eval_ctx = build_eval_context(resolved, actor, env)
-        gctx = GateContext(
-            resolved=resolved,
-            actor=actor,
-            session=session,
-            env=env,
-            eval_ctx=eval_ctx,
-            registry=self.registry,
-            counters=self.counters,
-            hooks=self.hooks,
-            preconditions=self.preconditions,
-            failure_mode=policy.policy.defaults.failureMode,
-            agent=policy.agent,
-        )
+        gctx = self._context(resolved, actor, session, policy, env)
 
         items: list[tuple[int, str, Any]] = []
         # built-in transition guard, always (RFC §7.6) — cheapest, runs first.
@@ -159,6 +171,32 @@ class DefaultGateEngine:
             )
         return GateOutcome(Outcome.PASS, tuple(results))
 
+    def revalidate_volatile(
+        self,
+        resolved: ResolvedAction,
+        actor: Actor,
+        session: Session,
+        policy: "CompiledPolicy",
+        env: RequestEnv,
+    ) -> GateResult | None:
+        """Dispatch-time re-validation of the VOLATILE gates only (v0.4 CS-017).
+
+        Re-runs ``allowlist``/``denylist``/``window``/``precondition``/
+        ``emissionControl`` for a claimed staged row against dispatch-time state;
+        the non-volatile gates (counters, approvals, content, value limits) stay
+        decided — re-running them would double-count or re-request the grant.
+        Returns the first non-PASS result (a HOLD here is treated as stale too:
+        a claimed row cannot be re-suspended) or ``None`` when still fresh.
+        """
+        gctx = self._context(resolved, actor, session, policy, env)
+        for name, cfg in policy.gates_for(resolved).items():
+            if name not in VOLATILE_GATES:
+                continue
+            result = self._run_one(name, cfg, gctx)
+            if result.outcome is not Outcome.PASS:
+                return result
+        return None
+
     def _run_one(self, name: str, cfg: Any, gctx: GateContext) -> GateResult:
         # `when:` makes ANY gate conditional (RFC §7). A runtime resolution error
         # in the condition is fail-closed for the gate (design §10; C8), distinct
@@ -176,6 +214,22 @@ class DefaultGateEngine:
         if name == _TRANSITION_GUARD:
             return g.check_from_states(cfg["from"], gctx)
         return _GATES[name][1](cfg, gctx)
+
+
+def make_dispatch_revalidator(
+    engine: DefaultGateEngine, policy: "CompiledPolicy"
+) -> DispatchRevalidator:
+    """Bind an engine + compiled policy into the ``DispatchWorker``'s CS-017
+    re-validation hook. The row's actor/session are the STAGED identity
+    (invariant 3 — never re-derived); only the clock is dispatch-time."""
+
+    def revalidate(row: PendingAction, now: datetime) -> GateResult | None:
+        session = Session(id=row.session_id, correlation_id=row.correlation_id)
+        return engine.revalidate_volatile(
+            row.resolved, row.actor, session, policy, RequestEnv(now=now)
+        )
+
+    return revalidate
 
 
 def _eval_when(src: str, gctx: GateContext) -> bool:

@@ -14,11 +14,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from datetime import datetime
+
 from acp_core.audit import AuditSink, build_record
 from acp_core.compiler import CompiledPolicy
 from acp_core.connector import ConnectorRegistry
 from acp_core.enums import Decision, Kind, Outcome
 from acp_core.failure import Unavailable, guard, should_fail_closed
+from acp_core.freshness import FreshnessConfig
 from acp_core.gating import ApprovalSpec, GateEngine, RequestEnv
 from acp_core.kill import KillStore, KillTarget
 from acp_core.models import (
@@ -48,6 +51,7 @@ def enforce(
     connectors: ConnectorRegistry | None = None,
     outbox: OutboxStore | None = None,
     kill: KillStore | None = None,
+    freshness: FreshnessConfig | None = None,
     agent: str = "unknown",
 ) -> EvalResult:
     """Evaluate one attempted action to a terminal, audited decision.
@@ -155,12 +159,21 @@ def enforce(
             ticket = None
             if outbox is not None:
                 ob = outbox
+                expiry = _staging_expiry(freshness, env, resolved)
+                if isinstance(expiry, Unavailable):
+                    return _terminal(
+                        Decision.DENY, "freshness-unavailable", call, resolved, actor,
+                        session, audit, agent_name, gate_results=outcome.results,
+                        scope_applied=scope_applied,
+                    )
+                expires_at: datetime | None = expiry
                 held = guard(
                     lambda: ob.stage(
                         resolved=resolved, actor=actor, session_id=session.id,
                         agent=agent_name, state=PendingState.PENDING_APPROVAL,
                         correlation_id=session.correlation_id,
                         gates=outcome.results, approval=outcome.approval,
+                        expires_at=expires_at,
                     ),
                     reason="outbox-unavailable",
                 )
@@ -218,12 +231,21 @@ def enforce(
     if resolved.kind is Kind.EFFECT:
         if outbox is not None:
             ob = outbox
+            expiry = _staging_expiry(freshness, env, resolved)
+            if isinstance(expiry, Unavailable):
+                return _terminal(
+                    Decision.DENY, "freshness-unavailable", call, resolved, actor,
+                    session, audit, agent_name, gate_results=gate_trace,
+                    scope_applied=scope_applied,
+                )
+            effect_expires_at: datetime | None = expiry
             staged = guard(
                 lambda: ob.stage(
                     resolved=resolved, actor=actor, session_id=session.id,
                     agent=agent_name, state=PendingState.PENDING,
                     correlation_id=session.correlation_id,
                     gates=gate_trace, compensation=resolved.compensation,
+                    expires_at=effect_expires_at,
                 ),
                 reason="outbox-unavailable",
             )
@@ -280,6 +302,27 @@ def enforce(
         Decision.ALLOW, authz.rule, call, resolved, actor, session, audit,
         agent_name, gate_results=gate_trace, scope_applied=scope_applied,
     )
+
+
+def _staging_expiry(
+    freshness: FreshnessConfig | None,
+    env: RequestEnv | None,
+    resolved: ResolvedAction,
+) -> datetime | None | Unavailable:
+    """The ``expires_at`` to stamp on a row being staged (v0.4 CS-017).
+
+    ``None`` when freshness is not configured (opt-in: pre-v0.4 behaviour).
+    Freshness configured but no injected clock ⇒ ``Unavailable``: the gateway
+    cannot bound the decision's validity, and CS-017 requires every staged row's
+    TTL to be finite — so staging fails closed unconditionally (invariant 7),
+    like the outbox itself being down.
+    """
+    if freshness is None:
+        return None
+    now = env.now if env is not None else None
+    if now is None:
+        return Unavailable(reason="freshness-unavailable")
+    return freshness.expiry_for(resolved, now)
 
 
 def _approval_audit(

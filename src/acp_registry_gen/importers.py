@@ -9,7 +9,7 @@ so drafting a named ``read`` action would just be noise.
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from acp_registry_gen.kinds import (
     entity_from_words,
@@ -86,7 +86,7 @@ def _add_action(
 # MCP tool list
 # --------------------------------------------------------------------------
 def draft_from_mcp_tools(
-    tools: list[Mapping[str, Any]] | Mapping[str, Any], *, domain: str
+    tools: Sequence[Mapping[str, Any]] | Mapping[str, Any], *, domain: str
 ) -> DraftRegistry:
     """Draft a registry from an MCP tool list.
 

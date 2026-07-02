@@ -131,12 +131,12 @@ Translate each scenario into an automated test **before** implementing the featu
 - Given an irreversible `effect` with a declared compensation that fails at the connector
 - When dispatched and it fails → a compensating effect is staged, and the failure is audited (not lost).
 
-**D5 — decision TTL cancels a stale staged effect (v0.4 — PROPOSED, CS-017)**
+**D5 — decision TTL cancels a stale staged effect (v0.4 CS-017 — implemented, `test_v04_freshness.py`)**
 - Given a staged irreversible effect with a short decision TTL
 - When the dispatch worker claims it after the TTL has lapsed (e.g. an approval arrives late)
 - Then the row settles `CANCELLED` with reason `stale-decision`, nothing is dispatched, the agent's ticket resolves to a recoverable refusal, and a late approval does not resurrect it.
 
-**D6 — volatile gates re-validated at dispatch (v0.4 — PROPOSED, CS-017)**
+**D6 — volatile gates re-validated at dispatch (v0.4 CS-017 — implemented, `test_v04_freshness.py`)**
 - Given a staged `pay` that passed the sanctions `denylist` at decision time
 - When the destination is added to the denylist before dispatch
 - Then the dispatch-time re-validation (inside the claimed transaction, after the kill re-check) settles the row `CANCELLED` with reason `stale-guard:denylist`; counters/approvals/contentCheck are NOT re-run.

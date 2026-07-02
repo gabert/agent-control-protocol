@@ -18,7 +18,9 @@ from acp_core.outbox import (
     PendingAction,
     PendingState,
     SelfApprovalError,
+    StaleCheck,
     UnknownTicketError,
+    cancellation_record,
 )
 
 
@@ -37,6 +39,7 @@ def build_pending(
     gates: tuple[GateResult, ...],
     approval: ApprovalSpec | None,
     compensation: Compensation | None,
+    expires_at: datetime | None = None,
 ) -> PendingAction:
     """Construct a staged row with generated id + idempotency key. id/clock
     generation lives here (the I/O layer), not in the pure pipeline (invariant 1)."""
@@ -53,6 +56,7 @@ def build_pending(
         gates=gates,
         approval=approval,
         compensation=compensation,
+        expires_at=expires_at,
         created_at=now,
         updated_at=now,
     )
@@ -78,11 +82,12 @@ class InMemoryOutboxStore:
         gates: tuple[GateResult, ...] = (),
         approval: ApprovalSpec | None = None,
         compensation: Compensation | None = None,
+        expires_at: datetime | None = None,
     ) -> PendingAction:
         row = build_pending(
             resolved=resolved, actor=actor, session_id=session_id, agent=agent,
             state=state, correlation_id=correlation_id, gates=gates,
-            approval=approval, compensation=compensation,
+            approval=approval, compensation=compensation, expires_at=expires_at,
         )
         self._rows[row.id] = row
         self._order.append(row.id)
@@ -95,7 +100,9 @@ class InMemoryOutboxStore:
         return [self._rows[i] for i in self._order if self._rows[i].state is state]
 
     def claim_next_pending(
-        self, kill_check: KillCheck | None = None
+        self,
+        kill_check: KillCheck | None = None,
+        stale_check: StaleCheck | None = None,
     ) -> PendingAction | None:
         for action_id in self._order:
             row = self._rows[action_id]
@@ -106,6 +113,16 @@ class InMemoryOutboxStore:
                 self._rows[action_id] = row.model_copy(
                     update={"state": PendingState.CANCELLED, "reason": "kill", "updated_at": _now()}
                 )
+                continue
+            if stale_check is not None and (stale := stale_check(row)) is not None:
+                # stale inside the claim (v0.4 CS-017) ⇒ CANCELLED + audited, in
+                # this same (logical) transaction; keep scanning for a fresh row.
+                cancelled = row.model_copy(
+                    update={"state": PendingState.CANCELLED, "reason": stale, "updated_at": _now()}
+                )
+                self._rows[action_id] = cancelled
+                if self._audit is not None:
+                    self._audit.write(cancellation_record(cancelled, stale))
                 continue
             claimed = row.model_copy(
                 update={"state": PendingState.DISPATCHING, "updated_at": _now()}

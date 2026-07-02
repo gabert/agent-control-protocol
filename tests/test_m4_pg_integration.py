@@ -123,6 +123,55 @@ def test_for_update_claims_each_row_once(container: PostgresContainer) -> None:
     conn.close()
 
 
+def test_stale_decision_cancelled_inside_claim(container: PostgresContainer) -> None:
+    # v0.4 CS-017 (D5 over real Postgres): an expired row is cancelled inside the
+    # FOR UPDATE claim transaction — with its audit record — and the scan moves on
+    # to the next fresh row.
+    from datetime import datetime, timedelta, timezone
+
+    conn = _connect(container)
+    _truncate(conn)
+    store = PostgresOutboxStore(conn)
+    effect_conn = InMemoryConnector()
+    t0 = datetime(2026, 7, 2, 9, 0, tzinfo=timezone.utc)
+    worker = DispatchWorker(
+        store,
+        Connectors({"email": effect_conn}),
+        registry=full_registry(),
+        clock=lambda: t0 + timedelta(hours=1),
+    )
+
+    stale = store.stage(
+        resolved=_resolve("Email", "sendEmail", {"to": "x@acme.example"}),
+        actor=Actor(id="alice"),
+        session_id="s1",
+        agent="support",
+        state=PendingState.PENDING,
+        expires_at=t0 + timedelta(minutes=30),
+    )
+    fresh = store.stage(
+        resolved=_resolve("Email", "sendEmail", {"to": "y@acme.example"}),
+        actor=Actor(id="alice"),
+        session_id="s1",
+        agent="support",
+        state=PendingState.PENDING,
+        expires_at=t0 + timedelta(hours=2),
+    )
+
+    assert worker.drain() == 1  # only the fresh row is dispatched
+    assert _state(store, stale.id) is PendingState.CANCELLED
+    stale_row = store.get(stale.id)
+    assert stale_row is not None and stale_row.reason == "stale-decision"
+    assert _state(store, fresh.id) is PendingState.DONE
+    assert len(effect_conn.effects) == 1
+
+    # both the stale cancellation and the settle wrote audit rows
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM audit_log")
+        assert cur.fetchone()[0] == 2
+    conn.close()
+
+
 def test_approval_release_over_postgres(container: PostgresContainer) -> None:
     conn = _connect(container)
     _truncate(conn)

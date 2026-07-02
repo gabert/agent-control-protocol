@@ -291,6 +291,41 @@ This gives at-least-once dispatch with idempotency (effectively once), a cancell
 
 > **Design note.** The cost is that effects are now **asynchronous**: the agent gets "accepted/pending," not "sent," on the first turn. For most enterprise actions that's correct (and matches how humans work). For the rare effect that must be synchronous and is safely cancellable, allow an inline fast-path that still writes the audit — but default to staging. The RFC should make "effects are staged by default, inline is an opt-in for cancellable effects" explicit.
 
+### 9.1 Decision freshness (v0.4 CS-017) — what, why, how
+
+**What.** Staging opens a time gap between *decision* and *dispatch*, and a fact that was true at decision time can stop being true inside it (a payee newly sanctioned, an approval granted days ago). CS-017 closes that gap two ways: every staged row carries an **`expires_at`** (a decision TTL, set from deployment configuration — never policy syntax), and the dispatch claim **re-validates the volatile gates** — `allowlist`/`denylist`, `window`, `precondition`, `emissionControl` — against dispatch-time state. A lapsed row settles `CANCELLED`/`stale-decision`; a dispatch-time gate failure settles `CANCELLED`/`stale-guard:<gate>`. Both are audited in the same transaction as the cancel, and the scan continues so a stale row never blocks the queue. Check order inside the claim: **kill → TTL → volatile gates → connector**. Non-volatile gates are *not* re-run, by definition: counters (`rate`/`quota`/`quantityCap`/`spendLimit`) were consumed at decision time, `valueLimit`/`contentCheck` judge the frozen payload, and an approval grant *is* the release — its freshness is bounded by the TTL. A late approval promotes the row, but the TTL still cancels it at claim; the intent must be re-submitted.
+
+**Why.** It is the question a payments/healthcare buyer opens with: "what if the world changes after you decide but before you act?" v0.3 answered it only with the kill switch; CS-017 makes the answer structural — no staged decision can outlive its TTL, and set-membership/time/world-state guards are as fresh as the dispatch itself.
+
+**How.** Freshness is opt-in and off by default (v0.3 behaviour is unchanged when it's not configured). Wiring it takes three pieces:
+
+```python
+from acp_core import FreshnessConfig, enforce
+from acp_gates.engine import make_dispatch_revalidator
+from acp_store import DispatchWorker
+
+freshness = FreshnessConfig(              # deployment config, NOT policy syntax
+    default_ttl=timedelta(hours=24),      # every staged row; MUST be finite
+    irreversible_ttl=timedelta(minutes=30),  # short TTL for irreversible effects
+)
+
+# 1. decision side: enforce() stamps expires_at on every row it stages.
+#    Requires the injected clock (env.now); freshness configured with no clock
+#    fails closed at staging (DENY "freshness-unavailable") — the gateway
+#    cannot bound a decision's validity without a clock.
+result = enforce(call, actor, session, ..., env=RequestEnv(now=now), freshness=freshness)
+
+# 2. dispatch side: the worker gets a clock (for the TTL check) and the
+#    volatile-gate re-validator bound to the same engine + compiled policy.
+worker = DispatchWorker(
+    outbox, connectors, registry=registry, kill=kill,
+    clock=lambda: datetime.now(timezone.utc),
+    revalidate=make_dispatch_revalidator(engine, policy),
+)
+```
+
+The agent sees a cancelled ticket resolve to a recoverable refusal (`stale-decision` / `stale-guard:<gate>`); nothing is ever partially dispatched. Spec text and acceptance scenarios: `docs/RFC-changeset-v0.3-to-v0.4.md` (CS-017), scenarios D5/D6, tests in `tests/test_v04_freshness.py`.
+
 ---
 
 ## 10. The condition engine (`when:`)

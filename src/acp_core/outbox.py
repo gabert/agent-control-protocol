@@ -21,8 +21,18 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from acp_core.enums import Decision
 from acp_core.gating import ApprovalSpec
-from acp_core.models import Actor, AuditRecord, Compensation, GateResult, ResolvedAction
+from acp_core.models import (
+    Actor,
+    AuditRecord,
+    Compensation,
+    EvalResult,
+    GateResult,
+    RawCall,
+    ResolvedAction,
+    Session,
+)
 
 
 class PendingState(str, Enum):
@@ -72,6 +82,10 @@ class PendingAction(BaseModel):
     compensation: Compensation | None = None
     result: dict[str, Any] | None = None  # connector result on settle
     reason: str | None = None  # why cancelled/failed
+    # Decision TTL (v0.4 CS-017): the staging-time expiry. A row claimed at or
+    # after this instant is cancelled ``stale-decision``. ``None`` = no expiry
+    # (freshness not configured — pre-v0.4 behaviour).
+    expires_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -80,6 +94,34 @@ class PendingAction(BaseModel):
 # passes ``None`` (no kill); M5 supplies the real check so the PENDING→DISPATCHING
 # transition and the kill test commit together.
 KillCheck = Callable[[PendingAction], bool]
+
+# The freshness check evaluated INSIDE the dispatch claim, after the kill check
+# and before the connector call (v0.4 CS-017: kill → TTL → volatile gates →
+# connector). Returns the cancel reason (``stale-decision`` /
+# ``stale-guard:<gate>``) or ``None`` when the row may dispatch.
+StaleCheck = Callable[[PendingAction], "str | None"]
+
+
+def cancellation_record(row: PendingAction, reason: str) -> AuditRecord:
+    """The audit record for a row cancelled inside the dispatch claim (CS-017:
+    stale cancellations are audited, in the same transaction as the cancel).
+    Deferred import keeps the module import graph acyclic-by-inspection."""
+    from acp_core.audit import build_record
+
+    result = EvalResult(decision=Decision.DENY, rule=reason, gates=row.gates, ticket=row.id)
+    return build_record(
+        agent=row.agent,
+        actor=row.actor,
+        session=Session(id=row.session_id, correlation_id=row.correlation_id),
+        call=RawCall(
+            resource=row.resolved.resource,
+            action=row.resolved.action,
+            data=dict(row.resolved.data),
+        ),
+        resolved=row.resolved,
+        result=result,
+        outcome="cancelled",
+    )
 
 
 class OutboxStore(Protocol):
@@ -99,6 +141,7 @@ class OutboxStore(Protocol):
         gates: tuple[GateResult, ...] = (),
         approval: ApprovalSpec | None = None,
         compensation: Compensation | None = None,
+        expires_at: datetime | None = None,
     ) -> PendingAction:
         """Persist a new staged row and return it (with generated id + key)."""
         ...
@@ -107,9 +150,15 @@ class OutboxStore(Protocol):
 
     def list_by_state(self, state: PendingState) -> list[PendingAction]: ...
 
-    def claim_next_pending(self, kill_check: KillCheck | None = None) -> PendingAction | None:
-        """Atomically move one ``PENDING`` row to ``DISPATCHING`` and return it
-        (or cancel it if ``kill_check`` matches). ``None`` if none are ready."""
+    def claim_next_pending(
+        self,
+        kill_check: KillCheck | None = None,
+        stale_check: StaleCheck | None = None,
+    ) -> PendingAction | None:
+        """Atomically move one ``PENDING`` row to ``DISPATCHING`` and return it —
+        or cancel it inside the same claim if ``kill_check`` matches (reason
+        ``kill``) or ``stale_check`` returns a reason (CS-017; audited) and keep
+        scanning. ``None`` if no row is ready."""
         ...
 
     def settle(
